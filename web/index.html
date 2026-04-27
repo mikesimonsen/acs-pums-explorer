@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ACS / PUMS Explorer</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        max-width: 64rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        color: #222;
+      }
+      h1 { margin-bottom: 0.25rem; }
+      .subtitle { color: #555; margin-top: 0; }
+      .controls {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 1.5rem 0 1rem;
+        padding: 0.75rem 1rem;
+        background: #f4f4f4;
+        border-radius: 6px;
+      }
+      .controls label { font-weight: 500; }
+      .controls select, .controls button {
+        font: inherit;
+        padding: 0.4rem 0.6rem;
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        background: white;
+      }
+      .controls button { cursor: pointer; }
+      .controls button:disabled, .controls select:disabled { opacity: 0.5; cursor: not-allowed; }
+      #status {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #777;
+        font-size: 0.85rem;
+        margin-left: auto;
+      }
+      #chart svg { max-width: 100%; height: auto; }
+      #chart figure { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>ACS / PUMS Explorer</h1>
+      <p class="subtitle">Median home value by county — 2020–2024 5-year ACS (Census table B25077).</p>
+      <div class="controls">
+        <label>State: <select id="state" disabled></select></label>
+        <button id="download" disabled>Download CSV</button>
+        <span id="status">Initializing DuckDB-WASM…</span>
+      </div>
+      <div id="chart"></div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
