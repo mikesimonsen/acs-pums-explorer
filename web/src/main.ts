@@ -2,42 +2,87 @@ import * as Plot from '@observablehq/plot';
 import type { AsyncDuckDBConnection } from '@duckdb/duckdb-wasm';
 import { getDuckDB } from './duckdb';
 
-const PARQUET_URL = new URL(
-  'data/parquet/acs_b25077_county_2020_2024.parquet',
-  document.baseURI,
-).href;
+type Metric = {
+  key: string;
+  label: string;
+  table: string;
+  parquet: string;
+  valueCol: string;
+  axisFormat: string;
+  rowFormat: (v: number) => string;
+};
 
+const METRICS: Metric[] = [
+  {
+    key: 'home_value',
+    label: 'Median home value',
+    table: 'B25077',
+    parquet: 'data/parquet/acs_b25077_county_2020_2024.parquet',
+    valueCol: 'median_home_value',
+    axisFormat: '$~s',
+    rowFormat: (v) => `$${(v / 1000).toFixed(0)}k`,
+  },
+  {
+    key: 'rent',
+    label: 'Median gross rent',
+    table: 'B25064',
+    parquet: 'data/parquet/acs_b25064_county_2020_2024.parquet',
+    valueCol: 'median_gross_rent',
+    axisFormat: '$,d',
+    rowFormat: (v) => `$${v.toLocaleString()}`,
+  },
+  {
+    key: 'income',
+    label: 'Median household income',
+    table: 'B19013',
+    parquet: 'data/parquet/acs_b19013_county_2020_2024.parquet',
+    valueCol: 'median_household_income',
+    axisFormat: '$~s',
+    rowFormat: (v) => `$${(v / 1000).toFixed(0)}k`,
+  },
+  {
+    key: 'ownership',
+    label: 'Homeownership rate',
+    table: 'B25003',
+    parquet: 'data/parquet/acs_b25003_county_2020_2024.parquet',
+    valueCol: 'homeownership_rate',
+    axisFormat: '.0%',
+    rowFormat: (v) => `${(v * 100).toFixed(1)}%`,
+  },
+];
+
+const metricSelect = document.getElementById('metric') as HTMLSelectElement;
 const stateSelect = document.getElementById('state') as HTMLSelectElement;
 const downloadBtn = document.getElementById('download') as HTMLButtonElement;
 const chartEl = document.getElementById('chart') as HTMLDivElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
+const sourceEl = document.getElementById('source') as HTMLParagraphElement;
 
-type CountyRow = {
-  state_fips: string;
-  county_fips: string;
-  geo_id: string;
-  state_name: string;
-  county_name: string;
-  median_home_value: number | null;
-  median_home_value_moe: number | null;
-};
-
-let currentRows: CountyRow[] = [];
+type Row = Record<string, unknown>;
+let currentRows: Row[] = [];
+let currentMetric: Metric = METRICS[0];
 let currentStateName = '';
+
+function url(rel: string): string {
+  return new URL(rel, document.baseURI).href;
+}
 
 async function main() {
   const db = await getDuckDB();
   const conn = await db.connect();
 
-  await conn.query(
-    `CREATE OR REPLACE VIEW b25077 AS SELECT * FROM read_parquet('${PARQUET_URL}')`,
-  );
+  for (const m of METRICS) {
+    const opt = document.createElement('option');
+    opt.value = m.key;
+    opt.textContent = m.label;
+    metricSelect.appendChild(opt);
+  }
 
-  const states = await conn.query(
-    `SELECT DISTINCT state_fips, state_name
-     FROM b25077
-     ORDER BY state_name`,
-  );
+  const states = await conn.query(`
+    SELECT DISTINCT state_fips, state_name
+    FROM read_parquet('${url(METRICS[0].parquet)}')
+    ORDER BY state_name
+  `);
   for (const row of states.toArray() as { state_fips: string; state_name: string }[]) {
     const opt = document.createElement('option');
     opt.value = row.state_fips;
@@ -45,31 +90,37 @@ async function main() {
     stateSelect.appendChild(opt);
   }
 
-  stateSelect.addEventListener('change', () => renderState(conn, stateSelect.value));
+  metricSelect.addEventListener('change', () => render(conn));
+  stateSelect.addEventListener('change', () => render(conn));
   downloadBtn.addEventListener('click', downloadCsv);
 
+  metricSelect.disabled = false;
   stateSelect.disabled = false;
   downloadBtn.disabled = false;
-  await renderState(conn, stateSelect.value);
+  await render(conn);
 }
 
-async function renderState(conn: AsyncDuckDBConnection, stateFips: string) {
+async function render(conn: AsyncDuckDBConnection) {
+  const metric = METRICS.find((m) => m.key === metricSelect.value) ?? METRICS[0];
+  const stateFips = stateSelect.value;
   if (!/^\d{2}$/.test(stateFips)) throw new Error(`bad state_fips: ${stateFips}`);
+
+  currentMetric = metric;
   statusEl.textContent = 'Querying…';
 
   const result = await conn.query(`
-    SELECT state_fips, county_fips, geo_id, state_name, county_name,
-           CAST(median_home_value AS INTEGER) AS median_home_value,
-           CAST(median_home_value_moe AS INTEGER) AS median_home_value_moe
-    FROM b25077
+    SELECT * REPLACE (CAST(${metric.valueCol} AS DOUBLE) AS ${metric.valueCol})
+    FROM read_parquet('${url(metric.parquet)}')
     WHERE state_fips = '${stateFips}'
-    ORDER BY median_home_value DESC NULLS LAST
+    ORDER BY ${metric.valueCol} DESC NULLS LAST
   `);
-  currentRows = result.toArray() as CountyRow[];
-  currentStateName = currentRows[0]?.state_name ?? '';
+  currentRows = result.toArray() as Row[];
+  currentStateName = (currentRows[0]?.state_name as string) ?? '';
+
+  sourceEl.textContent = `Source: ACS table ${metric.table}, 5-year (${currentStateName}).`;
 
   chartEl.innerHTML = '';
-  const plotted = currentRows.filter((r) => r.median_home_value != null);
+  const plotted = currentRows.filter((r) => r[metric.valueCol] != null);
   if (plotted.length === 0) {
     chartEl.textContent = 'No data for this state.';
     statusEl.textContent = `${currentRows.length} counties (all null)`;
@@ -78,22 +129,21 @@ async function renderState(conn: AsyncDuckDBConnection, stateFips: string) {
 
   const chart = Plot.plot({
     marginLeft: 200,
-    marginRight: 60,
+    marginRight: 90,
     height: Math.max(280, plotted.length * 20 + 60),
-    x: { label: 'Median home value ($)', grid: true, tickFormat: '$~s' },
+    x: { label: metric.label, grid: true, tickFormat: metric.axisFormat },
     y: { label: null },
     marks: [
       Plot.barX(plotted, {
-        x: 'median_home_value',
+        x: metric.valueCol,
         y: 'county_name',
         sort: { y: 'x', reverse: true },
         fill: '#4c78a8',
       }),
       Plot.text(plotted, {
-        x: 'median_home_value',
+        x: metric.valueCol,
         y: 'county_name',
-        text: (d: CountyRow) =>
-          d.median_home_value != null ? `$${(d.median_home_value / 1000).toFixed(0)}k` : '',
+        text: (d: Row) => metric.rowFormat(d[metric.valueCol] as number),
         textAnchor: 'start',
         dx: 4,
         fontSize: 10,
@@ -104,34 +154,32 @@ async function renderState(conn: AsyncDuckDBConnection, stateFips: string) {
   });
   chartEl.appendChild(chart);
 
-  statusEl.textContent = `${currentRows.length} counties (${currentRows.length - plotted.length} null)`;
+  const nulls = currentRows.length - plotted.length;
+  statusEl.textContent = `${currentRows.length} counties${nulls ? ` (${nulls} null)` : ''}`;
 }
 
 function downloadCsv() {
   if (!currentRows.length) return;
-  const headers: (keyof CountyRow)[] = [
-    'state_fips', 'county_fips', 'geo_id',
-    'state_name', 'county_name',
-    'median_home_value', 'median_home_value_moe',
-  ];
+  const headers = Object.keys(currentRows[0]);
   const lines = [headers.join(',')];
   for (const r of currentRows) {
     lines.push(headers.map((h) => csvCell(r[h])).join(','));
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  const u = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url;
-  a.download = `b25077_${currentStateName.replace(/\s+/g, '_').toLowerCase()}_2020_2024.csv`;
+  a.href = u;
+  const stateSlug = currentStateName.replace(/\s+/g, '_').toLowerCase();
+  a.download = `${currentMetric.table.toLowerCase()}_${stateSlug}_2020_2024.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(u);
 }
 
 function csvCell(val: unknown): string {
   if (val == null) return '';
-  const s = String(val);
+  const s = typeof val === 'bigint' ? val.toString() : String(val);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

@@ -19,7 +19,7 @@
         gap: 1rem;
         align-items: center;
         flex-wrap: wrap;
-        margin: 1.5rem 0 1rem;
+        margin: 1.5rem 0 0.5rem;
         padding: 0.75rem 1rem;
         background: #f4f4f4;
         border-radius: 6px;
@@ -40,6 +40,11 @@
         font-size: 0.85rem;
         margin-left: auto;
       }
+      #source {
+        color: #777;
+        font-size: 0.85rem;
+        margin: 0 0 1rem;
+      }
       #chart svg { max-width: 100%; height: auto; }
       #chart figure { margin: 0; }
     </style>
@@ -47,12 +52,14 @@
   <body>
     <main>
       <h1>ACS / PUMS Explorer</h1>
-      <p class="subtitle">Median home value by county — 2020–2024 5-year ACS (Census table B25077).</p>
+      <p class="subtitle">County-level housing and income metrics from the American Community Survey, 2020–2024 5-year estimates.</p>
       <div class="controls">
+        <label>Metric: <select id="metric"></select></label>
         <label>State: <select id="state" disabled></select></label>
         <button id="download" disabled>Download CSV</button>
         <span id="status">Initializing DuckDB-WASM…</span>
       </div>
+      <p id="source"></p>
       <div id="chart"></div>
     </main>
     <script type="module" src="/src/main.ts"></script>
