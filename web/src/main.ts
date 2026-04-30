@@ -473,7 +473,7 @@ function drawHistogram(
 }
 
 function drawCategorical(
-  dist: Distribution,
+  _dist: Distribution,
   stateRows: DistRow[],
   countyRows: DistRow[] | null,
   countyName: string,
