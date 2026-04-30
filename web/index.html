@@ -7,7 +7,7 @@
     <style>
       body {
         font-family: system-ui, -apple-system, sans-serif;
-        max-width: 64rem;
+        max-width: 72rem;
         margin: 2rem auto;
         padding: 0 1rem;
         color: #222;
@@ -34,6 +34,8 @@
       }
       .controls button { cursor: pointer; }
       .controls button:disabled, .controls select:disabled { opacity: 0.5; cursor: not-allowed; }
+      .controls .group { display: flex; gap: 0.5rem; align-items: center; }
+      .controls [hidden] { display: none !important; }
       #status {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         color: #777;
@@ -52,9 +54,19 @@
   <body>
     <main>
       <h1>ACS / PUMS Explorer</h1>
-      <p class="subtitle">County-level housing and income metrics from the American Community Survey, 2020–2024 5-year estimates.</p>
+      <p class="subtitle">County-level housing and demographic metrics from the American Community Survey, 2020–2024 5-year estimates.</p>
       <div class="controls">
-        <label>Metric: <select id="metric"></select></label>
+        <label>View: <select id="view">
+          <option value="bar">Bar chart (rank counties)</option>
+          <option value="scatter">Scatter (compare two metrics)</option>
+        </select></label>
+        <span class="group" data-view="bar">
+          <label>Metric: <select id="metric"></select></label>
+        </span>
+        <span class="group" data-view="scatter" hidden>
+          <label>X: <select id="xMetric"></select></label>
+          <label>Y: <select id="yMetric"></select></label>
+        </span>
         <label>State: <select id="state" disabled></select></label>
         <button id="download" disabled>Download CSV</button>
         <span id="status">Initializing DuckDB-WASM…</span>
