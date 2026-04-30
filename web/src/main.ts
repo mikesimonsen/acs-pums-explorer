@@ -89,7 +89,66 @@ const METRICS: Metric[] = [
   },
 ];
 
+type Distribution = {
+  key: string;
+  label: string;
+  table: string;
+  parquet: string;
+  totalLabel: string;
+  axisTitle: string;
+  kind: 'histogram' | 'categorical';
+};
+
+const DISTRIBUTIONS: Distribution[] = [
+  {
+    key: 'home_value_brackets',
+    label: 'Home value (B25075)',
+    table: 'B25075',
+    parquet: 'data/parquet/acs_b25075_county_2020_2024.parquet',
+    totalLabel: 'owner-occupied housing units',
+    axisTitle: 'Home value bracket',
+    kind: 'histogram',
+  },
+  {
+    key: 'income_brackets',
+    label: 'Household income (B19001)',
+    table: 'B19001',
+    parquet: 'data/parquet/acs_b19001_county_2020_2024.parquet',
+    totalLabel: 'households',
+    axisTitle: 'Household income bracket',
+    kind: 'histogram',
+  },
+  {
+    key: 'year_built',
+    label: 'Year structure built (B25034)',
+    table: 'B25034',
+    parquet: 'data/parquet/acs_b25034_county_2020_2024.parquet',
+    totalLabel: 'housing units',
+    axisTitle: 'Year built',
+    kind: 'histogram',
+  },
+  {
+    key: 'race_ethnicity',
+    label: 'Race / ethnicity (B03002)',
+    table: 'B03002',
+    parquet: 'data/parquet/acs_b03002_county_2020_2024.parquet',
+    totalLabel: 'people',
+    axisTitle: 'Share',
+    kind: 'categorical',
+  },
+  {
+    key: 'education',
+    label: 'Education attainment, 25+ (B15003)',
+    table: 'B15003',
+    parquet: 'data/parquet/acs_b15003_county_2020_2024.parquet',
+    totalLabel: 'people age 25+',
+    axisTitle: 'Share',
+    kind: 'categorical',
+  },
+];
+
 const ALL_STATES_VALUE = 'all';
+const ALL_COUNTIES_VALUE = 'all';
 const TOP_N_NATIONWIDE = 50;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -97,6 +156,8 @@ const viewSelect = $<HTMLSelectElement>('view');
 const metricSelect = $<HTMLSelectElement>('metric');
 const xMetricSelect = $<HTMLSelectElement>('xMetric');
 const yMetricSelect = $<HTMLSelectElement>('yMetric');
+const distributionSelect = $<HTMLSelectElement>('distribution');
+const countySelect = $<HTMLSelectElement>('county');
 const stateSelect = $<HTMLSelectElement>('state');
 const downloadBtn = $<HTMLButtonElement>('download');
 const chartEl = $<HTMLDivElement>('chart');
@@ -114,6 +175,10 @@ function url(rel: string): string {
 
 function metricByKey(k: string): Metric {
   return METRICS.find((m) => m.key === k) ?? METRICS[0];
+}
+
+function distributionByKey(k: string): Distribution {
+  return DISTRIBUTIONS.find((d) => d.key === k) ?? DISTRIBUTIONS[0];
 }
 
 function setGroupVisibility(view: string) {
@@ -140,6 +205,18 @@ async function main() {
   populateMetricDropdown(xMetricSelect, 'income');
   populateMetricDropdown(yMetricSelect, 'home_value');
 
+  for (const d of DISTRIBUTIONS) {
+    const opt = document.createElement('option');
+    opt.value = d.key;
+    opt.textContent = d.label;
+    distributionSelect.appendChild(opt);
+  }
+
+  const allCountyOpt = document.createElement('option');
+  allCountyOpt.value = ALL_COUNTIES_VALUE;
+  allCountyOpt.textContent = 'All counties (state aggregate)';
+  countySelect.appendChild(allCountyOpt);
+
   const allOpt = document.createElement('option');
   allOpt.value = ALL_STATES_VALUE;
   allOpt.textContent = 'All states';
@@ -162,7 +239,11 @@ async function main() {
     setGroupVisibility(viewSelect.value);
     render(conn);
   });
-  for (const sel of [metricSelect, xMetricSelect, yMetricSelect, stateSelect]) {
+  stateSelect.addEventListener('change', () => {
+    void refreshCountyDropdown(conn);
+    render(conn);
+  });
+  for (const sel of [metricSelect, xMetricSelect, yMetricSelect, distributionSelect, countySelect]) {
     sel.addEventListener('change', () => render(conn));
   }
   downloadBtn.addEventListener('click', downloadCsv);
@@ -171,7 +252,30 @@ async function main() {
   metricSelect.disabled = false;
   stateSelect.disabled = false;
   downloadBtn.disabled = false;
+  await refreshCountyDropdown(conn);
   await render(conn);
+}
+
+async function refreshCountyDropdown(conn: AsyncDuckDBConnection) {
+  while (countySelect.options.length > 1) countySelect.remove(1);
+  const stateFips = stateSelect.value;
+  if (stateFips === ALL_STATES_VALUE || !/^\d{2}$/.test(stateFips)) {
+    countySelect.value = ALL_COUNTIES_VALUE;
+    return;
+  }
+  const result = await conn.query(`
+    SELECT county_fips, county_name
+    FROM read_parquet('${url(METRICS[0].parquet)}')
+    WHERE state_fips = '${stateFips}'
+    ORDER BY county_name
+  `);
+  for (const row of result.toArray() as { county_fips: string; county_name: string }[]) {
+    const opt = document.createElement('option');
+    opt.value = row.county_fips;
+    opt.textContent = row.county_name;
+    countySelect.appendChild(opt);
+  }
+  countySelect.value = ALL_COUNTIES_VALUE;
 }
 
 async function render(conn: AsyncDuckDBConnection) {
@@ -183,88 +287,263 @@ async function render(conn: AsyncDuckDBConnection) {
 
   if (viewSelect.value === 'scatter') {
     await renderScatter(conn, metricByKey(xMetricSelect.value), metricByKey(yMetricSelect.value), stateFips);
-  } else if (viewSelect.value === 'histogram') {
-    await renderHistogram(conn, stateFips);
+  } else if (viewSelect.value === 'distribution') {
+    await renderDistribution(conn, distributionByKey(distributionSelect.value), stateFips, countySelect.value);
   } else {
     await renderBar(conn, metricByKey(metricSelect.value), stateFips);
   }
 }
 
-const HISTOGRAM_PARQUET = 'data/parquet/acs_b25075_county_2020_2024.parquet';
+type DistRow = {
+  bracket_index: number;
+  bracket_label: string;
+  units: number;
+  share: number;
+};
 
-async function renderHistogram(conn: AsyncDuckDBConnection, stateFips: string) {
-  const isAll = stateFips === ALL_STATES_VALUE;
-  const where = isAll ? '' : `WHERE state_fips = '${stateFips}'`;
-
+async function fetchDistribution(
+  conn: AsyncDuckDBConnection,
+  dist: Distribution,
+  whereClause: string,
+): Promise<DistRow[]> {
   const result = await conn.query(`
     SELECT
       bracket_index,
       bracket_label,
       CAST(SUM(units) AS BIGINT) AS units,
-      CAST(SUM(units) AS DOUBLE) / CAST(SUM(SUM(units)) OVER () AS DOUBLE) AS share
-    FROM read_parquet('${url(HISTOGRAM_PARQUET)}')
-    ${where}
+      CAST(SUM(units) AS DOUBLE) / NULLIF(CAST(SUM(SUM(units)) OVER () AS DOUBLE), 0) AS share
+    FROM read_parquet('${url(dist.parquet)}')
+    ${whereClause}
     GROUP BY bracket_index, bracket_label
     ORDER BY bracket_index
   `);
-  const rows = result.toArray() as { bracket_index: number; bracket_label: string; units: bigint; share: number }[];
-
-  const totalUnits = rows.reduce((s, r) => s + Number(r.units), 0);
-  const stateRow = await conn.query(
-    isAll
-      ? `SELECT 'United States' AS state_name`
-      : `SELECT DISTINCT state_name FROM read_parquet('${url(HISTOGRAM_PARQUET)}') WHERE state_fips = '${stateFips}'`,
+  return (result.toArray() as { bracket_index: number; bracket_label: string; units: bigint; share: number | null }[]).map(
+    (r) => ({
+      bracket_index: r.bracket_index,
+      bracket_label: r.bracket_label,
+      units: Number(r.units),
+      share: r.share ?? 0,
+    }),
   );
-  const stateName = (stateRow.toArray()[0] as { state_name: string }).state_name;
+}
 
-  currentRows = rows.map((r) => ({
-    bracket_index: r.bracket_index,
-    bracket_label: r.bracket_label,
-    units: Number(r.units),
-    share: r.share,
-  }));
-  currentCsvHeaders = ['bracket_index', 'bracket_label', 'units', 'share'];
-  currentCsvFilename = `b25075_distribution_${slug(stateName)}.csv`;
+async function renderDistribution(
+  conn: AsyncDuckDBConnection,
+  dist: Distribution,
+  stateFips: string,
+  countyFips: string,
+) {
+  const isAllStates = stateFips === ALL_STATES_VALUE;
+  const isCountySpecific = !isAllStates && countyFips !== ALL_COUNTIES_VALUE;
 
-  sourceEl.textContent = `Source: ACS table B25075, 5-year (${stateName}). ${totalUnits.toLocaleString()} owner-occupied housing units.`;
+  const stateWhere = isAllStates ? '' : `WHERE state_fips = '${stateFips}'`;
+  const stateRows = await fetchDistribution(conn, dist, stateWhere);
+  const stateTotal = stateRows.reduce((s, r) => s + r.units, 0);
+
+  let countyRows: DistRow[] | null = null;
+  let countyName = '';
+  if (isCountySpecific) {
+    const countyWhere = `WHERE state_fips = '${stateFips}' AND county_fips = '${countyFips}'`;
+    countyRows = await fetchDistribution(conn, dist, countyWhere);
+    const opt = countySelect.options[countySelect.selectedIndex];
+    countyName = opt ? opt.textContent ?? '' : '';
+  }
+
+  const stateName = isAllStates
+    ? 'United States'
+    : ((
+        await conn.query(`
+          SELECT DISTINCT state_name FROM read_parquet('${url(dist.parquet)}')
+          WHERE state_fips = '${stateFips}'
+        `)
+      ).toArray()[0] as { state_name: string }).state_name;
+
+  if (isCountySpecific && countyRows) {
+    currentRows = [
+      ...countyRows.map((r) => ({ ...r, scope: countyName })),
+      ...stateRows.map((r) => ({ ...r, scope: `${stateName} (state)` })),
+    ];
+  } else {
+    currentRows = stateRows;
+  }
+  currentCsvHeaders = isCountySpecific
+    ? ['scope', 'bracket_index', 'bracket_label', 'units', 'share']
+    : ['bracket_index', 'bracket_label', 'units', 'share'];
+  currentCsvFilename = `${dist.table.toLowerCase()}_${slug(stateName)}${
+    isCountySpecific ? `_${slug(countyName)}` : ''
+  }.csv`;
+
+  if (isCountySpecific) {
+    const countyTotal = countyRows!.reduce((s, r) => s + r.units, 0);
+    sourceEl.textContent = `${dist.label}: ${countyName} (${countyTotal.toLocaleString()} ${dist.totalLabel}) overlaid on ${stateName} aggregate (${stateTotal.toLocaleString()}).`;
+  } else {
+    sourceEl.textContent = `${dist.label}: ${stateName}. ${stateTotal.toLocaleString()} ${dist.totalLabel}.`;
+  }
 
   chartEl.innerHTML = '';
-  if (totalUnits === 0) {
+  if (stateTotal === 0) {
     chartEl.textContent = 'No data.';
     statusEl.textContent = '';
     return;
   }
 
-  const labels = rows.map((r) => r.bracket_label);
-  const chart = Plot.plot({
-    marginLeft: 70,
-    marginBottom: 130,
-    marginTop: 30,
-    marginRight: 30,
-    height: 520,
-    x: { label: 'Home value bracket', domain: labels, tickRotate: -45 },
-    y: { label: '↑ Share of owner-occupied units', grid: true, tickFormat: '.0%' },
-    marks: [
-      Plot.barY(rows, {
+  if (dist.kind === 'histogram') {
+    drawHistogram(dist, stateRows, isCountySpecific ? countyRows : null, countyName, stateName);
+  } else {
+    drawCategorical(dist, stateRows, isCountySpecific ? countyRows : null, countyName, stateName);
+  }
+
+  if (isCountySpecific) {
+    statusEl.textContent = `${stateRows.length} brackets · ${countyName} vs ${stateName}`;
+  } else {
+    statusEl.textContent = `${stateRows.length} brackets · ${stateTotal.toLocaleString()} ${dist.totalLabel}`;
+  }
+}
+
+function drawHistogram(
+  dist: Distribution,
+  stateRows: DistRow[],
+  countyRows: DistRow[] | null,
+  countyName: string,
+  stateName: string,
+) {
+  const labels = stateRows.map((r) => r.bracket_label);
+  const stateLabel = `${stateName} (state)`;
+
+  const marks: Plot.Markish[] = [];
+  if (countyRows) {
+    marks.push(
+      Plot.barY(countyRows, {
+        x: 'bracket_label',
+        y: 'share',
+        fill: '#4c78a8',
+        fillOpacity: 0.85,
+      }),
+      Plot.line(stateRows, {
+        x: 'bracket_label',
+        y: 'share',
+        stroke: '#c4453d',
+        strokeWidth: 2,
+      }),
+      Plot.dot(stateRows, {
+        x: 'bracket_label',
+        y: 'share',
+        fill: '#c4453d',
+        r: 3,
+      }),
+    );
+  } else {
+    marks.push(
+      Plot.barY(stateRows, {
         x: 'bracket_label',
         y: 'share',
         fill: '#4c78a8',
       }),
-      Plot.text(rows, {
+      Plot.text(stateRows, {
         x: 'bracket_label',
         y: 'share',
-        text: (d: { share: number }) => (d.share >= 0.005 ? `${(d.share * 100).toFixed(1)}%` : ''),
+        text: (d: DistRow) => (d.share >= 0.005 ? `${(d.share * 100).toFixed(1)}%` : ''),
         textAnchor: 'middle',
         dy: -6,
         fontSize: 9,
         fill: '#333',
       }),
-      Plot.ruleY([0]),
-    ],
+    );
+  }
+  marks.push(Plot.ruleY([0]));
+
+  const chart = Plot.plot({
+    marginLeft: 70,
+    marginBottom: 130,
+    marginTop: 40,
+    marginRight: 30,
+    height: 520,
+    x: { label: dist.axisTitle, domain: labels, tickRotate: -45 },
+    y: { label: '↑ Share', grid: true, tickFormat: '.0%' },
+    marks,
+    color: countyRows
+      ? {
+          legend: true,
+          domain: [countyName, stateLabel],
+          range: ['#4c78a8', '#c4453d'],
+        }
+      : undefined,
   });
   chartEl.appendChild(chart);
+}
 
-  statusEl.textContent = `${rows.length} brackets · ${totalUnits.toLocaleString()} units`;
+function drawCategorical(
+  dist: Distribution,
+  stateRows: DistRow[],
+  countyRows: DistRow[] | null,
+  countyName: string,
+  stateName: string,
+) {
+  const labels = stateRows.map((r) => r.bracket_label);
+  const stateLabel = `${stateName} (state)`;
+
+  const marks: Plot.Markish[] = [];
+  if (countyRows) {
+    marks.push(
+      Plot.barX(countyRows, {
+        x: 'share',
+        y: 'bracket_label',
+        fill: '#4c78a8',
+        fillOpacity: 0.85,
+      }),
+      Plot.tickX(stateRows, {
+        x: 'share',
+        y: 'bracket_label',
+        stroke: '#c4453d',
+        strokeWidth: 3,
+      }),
+      Plot.text(countyRows, {
+        x: 'share',
+        y: 'bracket_label',
+        text: (d: DistRow) => (d.share >= 0.001 ? `${(d.share * 100).toFixed(1)}%` : ''),
+        textAnchor: 'start',
+        dx: 6,
+        fontSize: 10,
+        fill: '#1f3b5a',
+      }),
+    );
+  } else {
+    marks.push(
+      Plot.barX(stateRows, {
+        x: 'share',
+        y: 'bracket_label',
+        fill: '#4c78a8',
+      }),
+      Plot.text(stateRows, {
+        x: 'share',
+        y: 'bracket_label',
+        text: (d: DistRow) => (d.share >= 0.001 ? `${(d.share * 100).toFixed(1)}%` : ''),
+        textAnchor: 'start',
+        dx: 4,
+        fontSize: 10,
+        fill: '#333',
+      }),
+    );
+  }
+  marks.push(Plot.ruleX([0]));
+
+  const chart = Plot.plot({
+    marginLeft: 320,
+    marginRight: 80,
+    marginTop: 40,
+    height: Math.max(300, labels.length * 40 + 80),
+    x: { label: '→ Share', grid: true, tickFormat: '.0%' },
+    y: { label: null, domain: labels },
+    marks,
+    color: countyRows
+      ? {
+          legend: true,
+          domain: [`${countyName} (bar)`, `${stateLabel} (tick)`],
+          range: ['#4c78a8', '#c4453d'],
+        }
+      : undefined,
+  });
+  chartEl.appendChild(chart);
 }
 
 async function renderBar(conn: AsyncDuckDBConnection, metric: Metric, stateFips: string) {

@@ -59,7 +59,7 @@
         <label>View: <select id="view">
           <option value="bar">Bar chart (rank counties)</option>
           <option value="scatter">Scatter (compare two metrics)</option>
-          <option value="histogram">Histogram (home value distribution)</option>
+          <option value="distribution">Distribution</option>
         </select></label>
         <span class="group" data-view="bar">
           <label>Metric: <select id="metric"></select></label>
@@ -67,6 +67,10 @@
         <span class="group" data-view="scatter" hidden>
           <label>X: <select id="xMetric"></select></label>
           <label>Y: <select id="yMetric"></select></label>
+        </span>
+        <span class="group" data-view="distribution" hidden>
+          <label>Show: <select id="distribution"></select></label>
+          <label>County: <select id="county"></select></label>
         </span>
         <label>State: <select id="state" disabled></select></label>
         <button id="download" disabled>Download CSV</button>
