@@ -13,13 +13,27 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Iterable
+from typing import Dict, Iterable, List, NamedTuple, Optional
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 from dotenv import load_dotenv
+
+
+class Bracket(NamedTuple):
+    """One row in a long-format distribution.
+
+    `suffixes` is the list of ACS variable id suffixes (e.g. ["003"] or
+    ["002", "003"]) whose estimate columns are summed into this bracket's
+    `units` count. `min`/`max` are the numeric range; null for open-ended
+    or categorical entries.
+    """
+    suffixes: List[str]
+    label: str
+    min: Optional[int]
+    max: Optional[int]
 
 ACS_END_YEAR = 2024
 ACS_DATASET = "acs/acs5"
@@ -129,3 +143,71 @@ def report(df: pd.DataFrame, parquet_path: Path, value_cols: Iterable[str]) -> N
         nulls = df[col].isna().sum()
         print(f"  {col}: {nulls} null")
     print(f"  parquet: {parquet_path.relative_to(PROJECT_ROOT)} ({parquet_path.stat().st_size:,} bytes)")
+
+
+def write_long_format_brackets(
+    table_id: str,
+    brackets: List[Bracket],
+    total_col_name: str,
+    total_var_suffix: str = "001",
+) -> Path:
+    """Read banked raw JSON, sum bracket variables, write long-format Parquet.
+
+    One row per (geo × bracket). Bracket entries can sum multiple raw
+    variables (useful for grouped categorical tables like education).
+    """
+    raw_path = RAW_DIR / f"acs_{table_id.lower()}_county_{WINDOW_LABEL}.json"
+    if not raw_path.exists():
+        sys.exit(f"missing raw JSON: {raw_path}\nRun: python -m pipeline.bank_raw")
+
+    rows = json.loads(raw_path.read_text())
+    df = to_geo_dataframe(rows)
+
+    rename = {f"{table_id}_{total_var_suffix}E": total_col_name}
+    all_suffixes = sorted({s for b in brackets for s in b.suffixes})
+    for suffix in all_suffixes:
+        rename[f"{table_id}_{suffix}E"] = f"_units_{suffix}"
+    df = coerce_acs_ints(df, rename)
+
+    long_rows: list[dict] = []
+    for idx, bracket in enumerate(brackets, start=1):
+        for _, row in df.iterrows():
+            parts = [row[f"_units_{s}"] for s in bracket.suffixes]
+            valid = [p for p in parts if pd.notna(p)]
+            units = int(sum(valid)) if len(valid) == len(parts) else None
+            total = row[total_col_name]
+            total_int = int(total) if pd.notna(total) else None
+            share = (
+                round(units / total_int, 6)
+                if units is not None and total_int and total_int > 0
+                else None
+            )
+            long_rows.append({
+                "state_fips": row["state_fips"],
+                "county_fips": row["county_fips"],
+                "geo_id": row["geo_id"],
+                "state_name": row["state_name"],
+                "county_name": row["county_name"],
+                total_col_name: total_int,
+                "bracket_index": idx,
+                "bracket_label": bracket.label,
+                "bracket_min": bracket.min,
+                "bracket_max": bracket.max,
+                "units": units,
+                "share": share,
+            })
+
+    long_df = pd.DataFrame(long_rows).sort_values(["geo_id", "bracket_index"]).reset_index(drop=True)
+
+    PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = PARQUET_DIR / f"acs_{table_id.lower()}_county_{WINDOW_LABEL}.parquet"
+    pq.write_table(
+        pa.Table.from_pandas(long_df, preserve_index=False),
+        out_path,
+        compression="zstd",
+    )
+
+    n_counties = long_df["geo_id"].nunique()
+    print(f"  rows: {len(long_df):,} ({n_counties} counties × {len(brackets)} brackets)")
+    print(f"  parquet: {out_path.relative_to(PROJECT_ROOT)} ({out_path.stat().st_size:,} bytes)")
+    return out_path
