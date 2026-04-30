@@ -53,6 +53,19 @@ def fetch_acs5_county(get_vars: Iterable[str]) -> list:
     return resp.json()
 
 
+def fetch_acs5_county_group(table_id: str) -> list:
+    """Fetch every variable in an ACS table for all US counties via the group() shortcut."""
+    url = f"https://api.census.gov/data/{ACS_END_YEAR}/{ACS_DATASET}"
+    params = {
+        "get": f"NAME,group({table_id})",
+        "for": "county:*",
+        "key": census_api_key(),
+    }
+    resp = requests.get(url, params=params, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def to_geo_dataframe(rows: list) -> pd.DataFrame:
     """Header + data rows → DataFrame with standard geo columns added."""
     header, *data = rows
@@ -76,6 +89,15 @@ def coerce_acs_ints(df: pd.DataFrame, rename: Dict[str, str]) -> pd.DataFrame:
     for src, dst in rename.items():
         col = pd.to_numeric(df[src], errors="coerce")
         df[dst] = col.where(col >= 0).astype("Int64")
+    return df
+
+
+def coerce_acs_floats(df: pd.DataFrame, rename: Dict[str, str]) -> pd.DataFrame:
+    """Same as coerce_acs_ints, but for fractional values (e.g. median age)."""
+    df = df.copy()
+    for src, dst in rename.items():
+        col = pd.to_numeric(df[src], errors="coerce")
+        df[dst] = col.where(col >= 0).astype("Float64")
     return df
 
 

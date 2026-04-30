@@ -49,6 +49,44 @@ const METRICS: Metric[] = [
     axisFormat: '.0%',
     rowFormat: (v) => `${(v * 100).toFixed(1)}%`,
   },
+  {
+    key: 'housing_units',
+    label: 'Total housing units',
+    table: 'B25001',
+    parquet: 'data/parquet/acs_b25001_county_2020_2024.parquet',
+    valueCol: 'total_housing_units',
+    axisFormat: '~s',
+    rowFormat: (v) =>
+      v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}k` : v.toLocaleString(),
+  },
+  {
+    key: 'vacancy_rate',
+    label: 'Vacancy rate',
+    table: 'B25002',
+    parquet: 'data/parquet/acs_b25002_county_2020_2024.parquet',
+    valueCol: 'vacancy_rate',
+    axisFormat: '.0%',
+    rowFormat: (v) => `${(v * 100).toFixed(1)}%`,
+  },
+  {
+    key: 'population',
+    label: 'Total population',
+    table: 'B01003',
+    parquet: 'data/parquet/acs_b01003_county_2020_2024.parquet',
+    valueCol: 'total_population',
+    axisFormat: '~s',
+    rowFormat: (v) =>
+      v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}k` : v.toLocaleString(),
+  },
+  {
+    key: 'median_age',
+    label: 'Median age',
+    table: 'B01002',
+    parquet: 'data/parquet/acs_b01002_county_2020_2024.parquet',
+    valueCol: 'median_age',
+    axisFormat: '.0f',
+    rowFormat: (v) => v.toFixed(1),
+  },
 ];
 
 const metricSelect = document.getElementById('metric') as HTMLSelectElement;
