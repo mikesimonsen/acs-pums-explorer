@@ -67,9 +67,14 @@ def fetch_acs5_county_group(table_id: str) -> list:
 
 
 def to_geo_dataframe(rows: list) -> pd.DataFrame:
-    """Header + data rows → DataFrame with standard geo columns added."""
+    """Header + data rows → DataFrame with standard geo columns added.
+
+    The group() endpoint returns NAME at both the start and the end of the row,
+    plus EA/MA annotation columns we don't need; drop duplicate columns here.
+    """
     header, *data = rows
     df = pd.DataFrame(data, columns=header)
+    df = df.loc[:, ~df.columns.duplicated()]
 
     # NAME comes back as "County Name, State Name"
     name_parts = df["NAME"].str.split(", ", n=1, expand=True)

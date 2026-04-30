@@ -183,9 +183,88 @@ async function render(conn: AsyncDuckDBConnection) {
 
   if (viewSelect.value === 'scatter') {
     await renderScatter(conn, metricByKey(xMetricSelect.value), metricByKey(yMetricSelect.value), stateFips);
+  } else if (viewSelect.value === 'histogram') {
+    await renderHistogram(conn, stateFips);
   } else {
     await renderBar(conn, metricByKey(metricSelect.value), stateFips);
   }
+}
+
+const HISTOGRAM_PARQUET = 'data/parquet/acs_b25075_county_2020_2024.parquet';
+
+async function renderHistogram(conn: AsyncDuckDBConnection, stateFips: string) {
+  const isAll = stateFips === ALL_STATES_VALUE;
+  const where = isAll ? '' : `WHERE state_fips = '${stateFips}'`;
+
+  const result = await conn.query(`
+    SELECT
+      bracket_index,
+      bracket_label,
+      CAST(SUM(units) AS BIGINT) AS units,
+      CAST(SUM(units) AS DOUBLE) / CAST(SUM(SUM(units)) OVER () AS DOUBLE) AS share
+    FROM read_parquet('${url(HISTOGRAM_PARQUET)}')
+    ${where}
+    GROUP BY bracket_index, bracket_label
+    ORDER BY bracket_index
+  `);
+  const rows = result.toArray() as { bracket_index: number; bracket_label: string; units: bigint; share: number }[];
+
+  const totalUnits = rows.reduce((s, r) => s + Number(r.units), 0);
+  const stateRow = await conn.query(
+    isAll
+      ? `SELECT 'United States' AS state_name`
+      : `SELECT DISTINCT state_name FROM read_parquet('${url(HISTOGRAM_PARQUET)}') WHERE state_fips = '${stateFips}'`,
+  );
+  const stateName = (stateRow.toArray()[0] as { state_name: string }).state_name;
+
+  currentRows = rows.map((r) => ({
+    bracket_index: r.bracket_index,
+    bracket_label: r.bracket_label,
+    units: Number(r.units),
+    share: r.share,
+  }));
+  currentCsvHeaders = ['bracket_index', 'bracket_label', 'units', 'share'];
+  currentCsvFilename = `b25075_distribution_${slug(stateName)}.csv`;
+
+  sourceEl.textContent = `Source: ACS table B25075, 5-year (${stateName}). ${totalUnits.toLocaleString()} owner-occupied housing units.`;
+
+  chartEl.innerHTML = '';
+  if (totalUnits === 0) {
+    chartEl.textContent = 'No data.';
+    statusEl.textContent = '';
+    return;
+  }
+
+  const labels = rows.map((r) => r.bracket_label);
+  const chart = Plot.plot({
+    marginLeft: 70,
+    marginBottom: 130,
+    marginTop: 30,
+    marginRight: 30,
+    height: 520,
+    x: { label: 'Home value bracket', domain: labels, tickRotate: -45 },
+    y: { label: '↑ Share of owner-occupied units', grid: true, tickFormat: '.0%' },
+    marks: [
+      Plot.barY(rows, {
+        x: 'bracket_label',
+        y: 'share',
+        fill: '#4c78a8',
+      }),
+      Plot.text(rows, {
+        x: 'bracket_label',
+        y: 'share',
+        text: (d: { share: number }) => (d.share >= 0.005 ? `${(d.share * 100).toFixed(1)}%` : ''),
+        textAnchor: 'middle',
+        dy: -6,
+        fontSize: 9,
+        fill: '#333',
+      }),
+      Plot.ruleY([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} brackets · ${totalUnits.toLocaleString()} units`;
 }
 
 async function renderBar(conn: AsyncDuckDBConnection, metric: Metric, stateFips: string) {
