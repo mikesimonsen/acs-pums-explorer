@@ -145,6 +145,42 @@ const DISTRIBUTIONS: Distribution[] = [
     axisTitle: 'Share',
     kind: 'categorical',
   },
+  {
+    key: 'bedrooms',
+    label: 'Bedrooms per unit (B25041)',
+    table: 'B25041',
+    parquet: 'data/parquet/acs_b25041_county_2020_2024.parquet',
+    totalLabel: 'housing units',
+    axisTitle: 'Bedrooms',
+    kind: 'histogram',
+  },
+  {
+    key: 'units_in_structure',
+    label: 'Units in structure (B25024)',
+    table: 'B25024',
+    parquet: 'data/parquet/acs_b25024_county_2020_2024.parquet',
+    totalLabel: 'housing units',
+    axisTitle: 'Share',
+    kind: 'categorical',
+  },
+  {
+    key: 'employment',
+    label: 'Employment status, 16+ (B23025)',
+    table: 'B23025',
+    parquet: 'data/parquet/acs_b23025_county_2020_2024.parquet',
+    totalLabel: 'people age 16+',
+    axisTitle: 'Share',
+    kind: 'categorical',
+  },
+  {
+    key: 'household_size',
+    label: 'Household size (B11016)',
+    table: 'B11016',
+    parquet: 'data/parquet/acs_b11016_county_2020_2024.parquet',
+    totalLabel: 'households',
+    axisTitle: 'Household size',
+    kind: 'histogram',
+  },
 ];
 
 const ALL_STATES_VALUE = 'all';
