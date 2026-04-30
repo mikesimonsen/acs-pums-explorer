@@ -187,6 +187,29 @@ const ALL_STATES_VALUE = 'all';
 const ALL_COUNTIES_VALUE = 'all';
 const TOP_N_NATIONWIDE = 50;
 
+type PumsXtab = {
+  key: string;
+  label: string;
+  needsPerson: boolean;
+};
+
+const PUMS_XTABS: PumsXtab[] = [
+  {
+    key: 'ownership_by_income_age',
+    label: 'Homeownership rate × income decile × householder age',
+    needsPerson: true,
+  },
+  {
+    key: 'rent_burden_by_income',
+    label: 'Rent burden distribution by income decile',
+    needsPerson: false,
+  },
+];
+
+// State FIPS codes that have PUMS Parquets in data/parquet/pums/.
+const PUMS_HOUSING_STATES = ['06', '12', '36', '48', '56'];
+const PUMS_PERSON_STATES = ['06', '12', '36', '56'];
+
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const viewSelect = $<HTMLSelectElement>('view');
 const metricSelect = $<HTMLSelectElement>('metric');
@@ -194,6 +217,7 @@ const xMetricSelect = $<HTMLSelectElement>('xMetric');
 const yMetricSelect = $<HTMLSelectElement>('yMetric');
 const distributionSelect = $<HTMLSelectElement>('distribution');
 const countySelect = $<HTMLSelectElement>('county');
+const pumsXtabSelect = $<HTMLSelectElement>('pumsXtab');
 const stateSelect = $<HTMLSelectElement>('state');
 const downloadBtn = $<HTMLButtonElement>('download');
 const chartEl = $<HTMLDivElement>('chart');
@@ -215,6 +239,22 @@ function metricByKey(k: string): Metric {
 
 function distributionByKey(k: string): Distribution {
   return DISTRIBUTIONS.find((d) => d.key === k) ?? DISTRIBUTIONS[0];
+}
+
+function pumsXtabByKey(k: string): PumsXtab {
+  return PUMS_XTABS.find((x) => x.key === k) ?? PUMS_XTABS[0];
+}
+
+function pumsHousingFiles(stateFipsList: string[]): string {
+  return stateFipsList
+    .map((s) => `'${url(`data/parquet/pums/h_${s}.parquet`)}'`)
+    .join(', ');
+}
+
+function pumsPersonFiles(stateFipsList: string[]): string {
+  return stateFipsList
+    .map((s) => `'${url(`data/parquet/pums/p_${s}.parquet`)}'`)
+    .join(', ');
 }
 
 function setGroupVisibility(view: string) {
@@ -248,6 +288,13 @@ async function main() {
     distributionSelect.appendChild(opt);
   }
 
+  for (const x of PUMS_XTABS) {
+    const opt = document.createElement('option');
+    opt.value = x.key;
+    opt.textContent = x.label;
+    pumsXtabSelect.appendChild(opt);
+  }
+
   const allCountyOpt = document.createElement('option');
   allCountyOpt.value = ALL_COUNTIES_VALUE;
   allCountyOpt.textContent = 'All counties (state aggregate)';
@@ -279,7 +326,14 @@ async function main() {
     void refreshCountyDropdown(conn);
     render(conn);
   });
-  for (const sel of [metricSelect, xMetricSelect, yMetricSelect, distributionSelect, countySelect]) {
+  for (const sel of [
+    metricSelect,
+    xMetricSelect,
+    yMetricSelect,
+    distributionSelect,
+    countySelect,
+    pumsXtabSelect,
+  ]) {
     sel.addEventListener('change', () => render(conn));
   }
   downloadBtn.addEventListener('click', downloadCsv);
@@ -325,6 +379,8 @@ async function render(conn: AsyncDuckDBConnection) {
     await renderScatter(conn, metricByKey(xMetricSelect.value), metricByKey(yMetricSelect.value), stateFips);
   } else if (viewSelect.value === 'distribution') {
     await renderDistribution(conn, distributionByKey(distributionSelect.value), stateFips, countySelect.value);
+  } else if (viewSelect.value === 'pums') {
+    await renderPums(conn, pumsXtabByKey(pumsXtabSelect.value), stateFips);
   } else {
     await renderBar(conn, metricByKey(metricSelect.value), stateFips);
   }
@@ -738,6 +794,232 @@ async function renderScatter(conn: AsyncDuckDBConnection, x: Metric, y: Metric, 
 
   const nullCount = rows.length - valid.length;
   statusEl.textContent = `${valid.length} counties${nullCount ? ` (${nullCount} dropped)` : ''}`;
+}
+
+async function renderPums(conn: AsyncDuckDBConnection, xtab: PumsXtab, stateFips: string) {
+  const isAll = stateFips === ALL_STATES_VALUE;
+  const housingPool = isAll ? PUMS_HOUSING_STATES : PUMS_HOUSING_STATES.filter((s) => s === stateFips);
+  const personPool = isAll ? PUMS_PERSON_STATES : PUMS_PERSON_STATES.filter((s) => s === stateFips);
+  const pool = xtab.needsPerson ? personPool : housingPool;
+
+  if (pool.length === 0) {
+    chartEl.innerHTML = '';
+    const need = xtab.needsPerson ? 'housing+person' : 'housing';
+    const have = xtab.needsPerson ? PUMS_PERSON_STATES : PUMS_HOUSING_STATES;
+    chartEl.textContent = `PUMS ${need} data is not available for the selected state. Available: ${have.join(', ')}.`;
+    sourceEl.textContent = '';
+    statusEl.textContent = '';
+    return;
+  }
+
+  if (xtab.key === 'ownership_by_income_age') {
+    await renderOwnershipHeatmap(conn, pool, isAll);
+  } else if (xtab.key === 'rent_burden_by_income') {
+    await renderRentBurdenStack(conn, pool, isAll);
+  }
+}
+
+async function renderOwnershipHeatmap(conn: AsyncDuckDBConnection, states: string[], isAll: boolean) {
+  const housing = pumsHousingFiles(states);
+  const person = pumsPersonFiles(states);
+
+  const sql = `
+    WITH base AS (
+      SELECT h.HINCP, h.WGTP, h.TEN, p.AGEP
+      FROM read_parquet([${housing}]) h
+      JOIN read_parquet([${person}]) p USING (SERIALNO)
+      WHERE p.SPORDER = 1
+        AND h.HINCP IS NOT NULL
+        AND h.TEN BETWEEN 1 AND 4
+    ),
+    binned AS (
+      SELECT
+        WGTP, TEN,
+        NTILE(10) OVER (ORDER BY HINCP) AS income_decile,
+        CASE
+          WHEN AGEP < 35 THEN '<35'
+          WHEN AGEP < 50 THEN '35-49'
+          WHEN AGEP < 65 THEN '50-64'
+          ELSE '65+'
+        END AS age_band
+      FROM base
+    )
+    SELECT
+      income_decile,
+      age_band,
+      CAST(SUM(WGTP) FILTER (WHERE TEN IN (1, 2)) AS DOUBLE) /
+        NULLIF(CAST(SUM(WGTP) AS DOUBLE), 0) AS owner_rate,
+      CAST(SUM(WGTP) AS BIGINT) AS households
+    FROM binned
+    GROUP BY income_decile, age_band
+    ORDER BY income_decile, age_band
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { income_decile: bigint | number; age_band: string; owner_rate: number | null; households: bigint }[]).map(
+    (r) => ({
+      income_decile: Number(r.income_decile),
+      age_band: r.age_band,
+      owner_rate: r.owner_rate,
+      households: Number(r.households),
+    }),
+  );
+
+  const totalHouseholds = rows.reduce((s, r) => s + r.households, 0);
+  const stateLabel = isAll ? `All PUMS states (${states.length})` : stateNameByFips(states[0]);
+
+  currentRows = rows;
+  currentCsvHeaders = ['income_decile', 'age_band', 'owner_rate', 'households'];
+  currentCsvFilename = `pums_ownership_${slug(stateLabel)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by WGTP. ${stateLabel}. ${totalHouseholds.toLocaleString()} households across ${rows.length} cells.`;
+
+  chartEl.innerHTML = '';
+  const chart = Plot.plot({
+    width: 720,
+    height: 420,
+    marginLeft: 100,
+    marginRight: 30,
+    marginTop: 40,
+    marginBottom: 60,
+    padding: 0.04,
+    x: {
+      label: '→ Householder age band',
+      domain: ['<35', '35-49', '50-64', '65+'],
+      type: 'band',
+    },
+    y: {
+      label: '↑ Income decile (10 = highest)',
+      domain: [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+      type: 'band',
+    },
+    color: {
+      type: 'linear',
+      scheme: 'blues',
+      label: 'Homeownership rate',
+      tickFormat: '.0%',
+      legend: true,
+      domain: [0, 1],
+    },
+    marks: [
+      Plot.cell(rows, { x: 'age_band', y: 'income_decile', fill: 'owner_rate', inset: 0.5 }),
+      Plot.text(rows, {
+        x: 'age_band',
+        y: 'income_decile',
+        text: (d: { owner_rate: number | null }) =>
+          d.owner_rate == null ? '—' : `${(d.owner_rate * 100).toFixed(0)}%`,
+        fill: (d: { owner_rate: number | null }) => ((d.owner_rate ?? 0) > 0.55 ? 'white' : '#222'),
+        fontSize: 11,
+      }),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} cells · ${totalHouseholds.toLocaleString()} weighted households`;
+}
+
+async function renderRentBurdenStack(conn: AsyncDuckDBConnection, states: string[], isAll: boolean) {
+  const housing = pumsHousingFiles(states);
+  const burdenOrder = [
+    'Not burdened (<30%)',
+    'Cost-burdened (30-49%)',
+    'Severely burdened (50%+)',
+  ];
+
+  const sql = `
+    WITH renters AS (
+      SELECT HINCP, WGTP, GRPIP
+      FROM read_parquet([${housing}])
+      WHERE TEN = 3 AND HINCP IS NOT NULL AND GRPIP IS NOT NULL
+    ),
+    binned AS (
+      SELECT
+        WGTP,
+        NTILE(10) OVER (ORDER BY HINCP) AS income_decile,
+        CASE
+          WHEN GRPIP >= 50 THEN 'Severely burdened (50%+)'
+          WHEN GRPIP >= 30 THEN 'Cost-burdened (30-49%)'
+          ELSE 'Not burdened (<30%)'
+        END AS burden
+      FROM renters
+    )
+    SELECT
+      income_decile,
+      burden,
+      CAST(SUM(WGTP) AS DOUBLE) /
+        NULLIF(CAST(SUM(SUM(WGTP)) OVER (PARTITION BY income_decile) AS DOUBLE), 0) AS share,
+      CAST(SUM(WGTP) AS BIGINT) AS households
+    FROM binned
+    GROUP BY income_decile, burden
+    ORDER BY income_decile,
+      CASE burden
+        WHEN 'Not burdened (<30%)' THEN 1
+        WHEN 'Cost-burdened (30-49%)' THEN 2
+        WHEN 'Severely burdened (50%+)' THEN 3
+      END
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { income_decile: bigint | number; burden: string; share: number | null; households: bigint }[]).map(
+    (r) => ({
+      income_decile: Number(r.income_decile),
+      burden: r.burden,
+      share: r.share ?? 0,
+      households: Number(r.households),
+    }),
+  );
+
+  const totalRenters = rows.reduce((s, r) => s + r.households, 0);
+  const stateLabel = isAll ? `All PUMS states (${states.length})` : stateNameByFips(states[0]);
+
+  currentRows = rows;
+  currentCsvHeaders = ['income_decile', 'burden', 'share', 'households'];
+  currentCsvFilename = `pums_rent_burden_${slug(stateLabel)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by WGTP. Renter households (TEN=3) in ${stateLabel}. ${totalRenters.toLocaleString()} weighted renters.`;
+
+  chartEl.innerHTML = '';
+  const chart = Plot.plot({
+    width: 720,
+    height: 440,
+    marginLeft: 60,
+    marginRight: 30,
+    marginTop: 40,
+    marginBottom: 60,
+    x: {
+      label: 'Income decile (10 = highest)',
+      domain: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      type: 'band',
+    },
+    y: { label: '↑ Share of renter households', tickFormat: '.0%', grid: true, domain: [0, 1] },
+    color: {
+      legend: true,
+      domain: burdenOrder,
+      range: ['#a6cee3', '#fdae61', '#d73027'],
+    },
+    marks: [
+      Plot.barY(rows, {
+        x: 'income_decile',
+        y: 'share',
+        fill: 'burden',
+        order: burdenOrder,
+      }),
+      Plot.ruleY([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} rows · ${totalRenters.toLocaleString()} weighted renters`;
+}
+
+const STATE_FIPS_TO_NAME: Record<string, string> = {
+  '06': 'California',
+  '12': 'Florida',
+  '36': 'New York',
+  '48': 'Texas',
+  '56': 'Wyoming',
+};
+
+function stateNameByFips(fips: string): string {
+  return STATE_FIPS_TO_NAME[fips] ?? fips;
 }
 
 function downloadCsv() {
