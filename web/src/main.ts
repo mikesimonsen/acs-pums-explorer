@@ -237,6 +237,42 @@ const PUMS_XTABS: PumsXtab[] = [
     needsPerson: true,
     needsMetro: true,
   },
+  {
+    key: 'income_by_metro',
+    label: 'Household income distribution (single metro)',
+    needsPerson: false,
+    needsMetro: true,
+  },
+  {
+    key: 'sex_age_pyramid',
+    label: 'Sex × age pyramid (single metro)',
+    needsPerson: true,
+    needsMetro: true,
+  },
+  {
+    key: 'citizenship_by_metro',
+    label: 'Citizenship status (single metro)',
+    needsPerson: true,
+    needsMetro: true,
+  },
+  {
+    key: 'disability_by_age',
+    label: 'Disability rate by age band (single metro)',
+    needsPerson: true,
+    needsMetro: true,
+  },
+  {
+    key: 'language_by_metro',
+    label: 'Household language at home (single metro)',
+    needsPerson: false,
+    needsMetro: true,
+  },
+  {
+    key: 'mortgage_burden_by_income',
+    label: 'Mortgage cost burden by income decile',
+    needsPerson: false,
+    needsMetro: false,
+  },
 ];
 
 const CROSSWALK_PARQUET = 'data/parquet/puma_cbsa_crosswalk.parquet';
@@ -245,7 +281,7 @@ const TOP_N_METROS_FACETED = 6;
 
 // State FIPS codes that have PUMS Parquets in data/parquet/pums/.
 const PUMS_HOUSING_STATES = ['06', '12', '36', '48', '56'];
-const PUMS_PERSON_STATES = ['06', '12', '36', '56'];
+const PUMS_PERSON_STATES = ['06', '12', '36', '48', '56'];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const viewSelect = $<HTMLSelectElement>('view');
@@ -910,7 +946,588 @@ async function renderPums(conn: AsyncDuckDBConnection, xtab: PumsXtab, stateFips
     await renderRaceByMetro(conn, pool);
   } else if (xtab.key === 'education_by_metro') {
     await renderEducationByMetro(conn, pool);
+  } else if (xtab.key === 'income_by_metro') {
+    await renderIncomeByMetro(conn, pool);
+  } else if (xtab.key === 'sex_age_pyramid') {
+    await renderSexAgePyramid(conn, pool);
+  } else if (xtab.key === 'citizenship_by_metro') {
+    await renderCitizenshipByMetro(conn, pool);
+  } else if (xtab.key === 'disability_by_age') {
+    await renderDisabilityByAge(conn, pool);
+  } else if (xtab.key === 'language_by_metro') {
+    await renderLanguageByMetro(conn, pool);
+  } else if (xtab.key === 'mortgage_burden_by_income') {
+    await renderMortgageBurdenStack(conn, pool, isAll);
   }
+}
+
+const INCOME_BUCKETS = [
+  { label: '< $10k', min: 0, max: 9_999 },
+  { label: '$10–25k', min: 10_000, max: 24_999 },
+  { label: '$25–50k', min: 25_000, max: 49_999 },
+  { label: '$50–75k', min: 50_000, max: 74_999 },
+  { label: '$75–100k', min: 75_000, max: 99_999 },
+  { label: '$100–150k', min: 100_000, max: 149_999 },
+  { label: '$150–200k', min: 150_000, max: 199_999 },
+  { label: '$200–300k', min: 200_000, max: 299_999 },
+  { label: '$300k+', min: 300_000, max: Number.MAX_SAFE_INTEGER },
+];
+
+async function renderIncomeByMetro(conn: AsyncDuckDBConnection, states: string[]) {
+  const cbsa = pumsMetroSelect.value;
+  if (!cbsa) {
+    chartEl.innerHTML = '';
+    chartEl.textContent = 'Pick a metro.';
+    statusEl.textContent = '';
+    sourceEl.textContent = '';
+    return;
+  }
+  const housing = pumsHousingFiles(states);
+  const sql = `
+    WITH joined AS (
+      SELECT h.HINCP, h.WGTP
+      FROM read_parquet([${housing}]) h
+      JOIN read_parquet('${url(CROSSWALK_PARQUET)}') c
+        ON h.STATE = c.state_fips AND h.PUMA = c.puma
+      WHERE c.cbsa_code = '${cbsa.replace(/'/g, "''")}'
+        AND h.HINCP IS NOT NULL
+    ),
+    bucketed AS (
+      SELECT WGTP,
+        CASE
+          WHEN HINCP < 10000 THEN 1
+          WHEN HINCP < 25000 THEN 2
+          WHEN HINCP < 50000 THEN 3
+          WHEN HINCP < 75000 THEN 4
+          WHEN HINCP < 100000 THEN 5
+          WHEN HINCP < 150000 THEN 6
+          WHEN HINCP < 200000 THEN 7
+          WHEN HINCP < 300000 THEN 8
+          ELSE 9
+        END AS bucket_idx
+      FROM joined
+    )
+    SELECT bucket_idx,
+      CAST(SUM(WGTP) AS BIGINT) AS households,
+      CAST(SUM(WGTP) AS DOUBLE) /
+        NULLIF(CAST(SUM(SUM(WGTP)) OVER () AS DOUBLE), 0) AS share
+    FROM bucketed
+    GROUP BY bucket_idx
+    ORDER BY bucket_idx
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { bucket_idx: bigint | number; households: bigint; share: number | null }[]).map(
+    (r) => ({
+      bucket_idx: Number(r.bucket_idx),
+      bucket_label: INCOME_BUCKETS[Number(r.bucket_idx) - 1]?.label ?? '?',
+      households: Number(r.households),
+      share: r.share ?? 0,
+    }),
+  );
+
+  const total = rows.reduce((s, r) => s + r.households, 0);
+  const metroName = pumsMetroSelect.options[pumsMetroSelect.selectedIndex]?.textContent ?? cbsa;
+
+  currentRows = rows;
+  currentCsvHeaders = ['bucket_idx', 'bucket_label', 'households', 'share'];
+  currentCsvFilename = `pums_income_${slug(metroName)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by WGTP. ${metroName}. ${total.toLocaleString()} weighted households.`;
+
+  chartEl.innerHTML = '';
+  if (total === 0) {
+    chartEl.textContent = `No PUMS housing records mapped to ${metroName}.`;
+    statusEl.textContent = '';
+    return;
+  }
+
+  const labels = INCOME_BUCKETS.map((b) => b.label);
+  const chart = Plot.plot({
+    width: 800,
+    height: 440,
+    marginLeft: 60,
+    marginRight: 30,
+    marginTop: 40,
+    marginBottom: 70,
+    x: { label: 'Household income bracket', domain: labels, type: 'band', tickRotate: -25 },
+    y: { label: '↑ Share of households', tickFormat: '.0%', grid: true },
+    marks: [
+      Plot.barY(rows, { x: 'bucket_label', y: 'share', fill: '#4c78a8' }),
+      Plot.text(rows, {
+        x: 'bucket_label',
+        y: 'share',
+        text: (d: { share: number }) => `${(d.share * 100).toFixed(1)}%`,
+        textAnchor: 'middle',
+        dy: -6,
+        fontSize: 10,
+        fill: '#222',
+      }),
+      Plot.ruleY([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} brackets · ${total.toLocaleString()} weighted households`;
+}
+
+const PYRAMID_AGE_LABELS = [
+  '0-4', '5-9', '10-14', '15-19', '20-24', '25-29', '30-34', '35-39', '40-44',
+  '45-49', '50-54', '55-59', '60-64', '65-69', '70-74', '75-79', '80-84', '85+',
+];
+
+async function renderSexAgePyramid(conn: AsyncDuckDBConnection, states: string[]) {
+  const cbsa = pumsMetroSelect.value;
+  if (!cbsa) {
+    chartEl.innerHTML = '';
+    chartEl.textContent = 'Pick a metro.';
+    statusEl.textContent = '';
+    sourceEl.textContent = '';
+    return;
+  }
+  const person = pumsPersonFiles(states);
+  const sql = `
+    WITH joined AS (
+      SELECT p.AGEP, p.SEX, p.PWGTP
+      FROM read_parquet([${person}]) p
+      JOIN read_parquet('${url(CROSSWALK_PARQUET)}') c
+        ON p.STATE = c.state_fips AND p.PUMA = c.puma
+      WHERE c.cbsa_code = '${cbsa.replace(/'/g, "''")}'
+        AND p.AGEP IS NOT NULL
+        AND p.SEX IS NOT NULL
+    )
+    SELECT
+      LEAST(CAST(FLOOR(AGEP / 5) AS INTEGER) * 5, 85) AS age_low,
+      SEX,
+      CAST(SUM(PWGTP) AS BIGINT) AS persons
+    FROM joined
+    GROUP BY age_low, SEX
+    ORDER BY age_low, SEX
+  `;
+  const result = await conn.query(sql);
+  const raw = (result.toArray() as { age_low: bigint | number; SEX: bigint | number; persons: bigint }[]).map(
+    (r) => ({
+      age_low: Number(r.age_low),
+      sex: Number(r.SEX) === 1 ? 'Male' : 'Female',
+      persons: Number(r.persons),
+    }),
+  );
+
+  const total = raw.reduce((s, r) => s + r.persons, 0);
+  const metroName = pumsMetroSelect.options[pumsMetroSelect.selectedIndex]?.textContent ?? cbsa;
+
+  const rows = raw.map((r) => {
+    const idx = Math.min(r.age_low / 5, 17);
+    const share = r.persons / total;
+    return {
+      age_band: PYRAMID_AGE_LABELS[idx],
+      sex: r.sex,
+      persons: r.persons,
+      share,
+      signed_share: r.sex === 'Male' ? -share : share,
+    };
+  });
+
+  currentRows = rows;
+  currentCsvHeaders = ['age_band', 'sex', 'persons', 'share'];
+  currentCsvFilename = `pums_pyramid_${slug(metroName)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by PWGTP. ${metroName}. ${total.toLocaleString()} weighted persons.`;
+
+  chartEl.innerHTML = '';
+  if (total === 0) {
+    chartEl.textContent = `No PUMS person records mapped to ${metroName}.`;
+    statusEl.textContent = '';
+    return;
+  }
+
+  const ageOrder = [...PYRAMID_AGE_LABELS].reverse();
+  const chart = Plot.plot({
+    width: 760,
+    height: 540,
+    marginLeft: 60,
+    marginRight: 30,
+    marginTop: 40,
+    x: {
+      label: '← Male                        Female →',
+      tickFormat: (d: number) => `${(Math.abs(d) * 100).toFixed(1)}%`,
+      grid: true,
+    },
+    y: { label: null, domain: ageOrder, type: 'band' },
+    color: {
+      legend: true,
+      domain: ['Male', 'Female'],
+      range: ['#4c78a8', '#e45756'],
+    },
+    marks: [
+      Plot.barX(rows, {
+        x: 'signed_share',
+        y: 'age_band',
+        fill: 'sex',
+      }),
+      Plot.ruleX([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${PYRAMID_AGE_LABELS.length} age bands × 2 sexes · ${total.toLocaleString()} weighted persons`;
+}
+
+const CITIZENSHIP_LABELS = [
+  'Born in U.S. (any state)',
+  'Born in U.S. territory (PR, VI, GU, MP)',
+  'Born abroad to U.S. parents',
+  'Naturalized U.S. citizen',
+  'Not a U.S. citizen',
+];
+
+async function renderCitizenshipByMetro(conn: AsyncDuckDBConnection, states: string[]) {
+  const cbsa = pumsMetroSelect.value;
+  if (!cbsa) {
+    chartEl.innerHTML = '';
+    chartEl.textContent = 'Pick a metro.';
+    statusEl.textContent = '';
+    sourceEl.textContent = '';
+    return;
+  }
+  const person = pumsPersonFiles(states);
+  const sql = `
+    WITH joined AS (
+      SELECT p.CIT, p.PWGTP
+      FROM read_parquet([${person}]) p
+      JOIN read_parquet('${url(CROSSWALK_PARQUET)}') c
+        ON p.STATE = c.state_fips AND p.PUMA = c.puma
+      WHERE c.cbsa_code = '${cbsa.replace(/'/g, "''")}'
+        AND p.CIT IS NOT NULL
+    )
+    SELECT CIT AS bucket_idx,
+      CAST(SUM(PWGTP) AS BIGINT) AS persons,
+      CAST(SUM(PWGTP) AS DOUBLE) /
+        NULLIF(CAST(SUM(SUM(PWGTP)) OVER () AS DOUBLE), 0) AS share
+    FROM joined
+    GROUP BY CIT
+    ORDER BY CIT
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { bucket_idx: bigint | number; persons: bigint; share: number | null }[]).map(
+    (r) => ({
+      bucket_idx: Number(r.bucket_idx),
+      bucket_label: CITIZENSHIP_LABELS[Number(r.bucket_idx) - 1] ?? '?',
+      persons: Number(r.persons),
+      share: r.share ?? 0,
+    }),
+  );
+
+  const total = rows.reduce((s, r) => s + r.persons, 0);
+  const metroName = pumsMetroSelect.options[pumsMetroSelect.selectedIndex]?.textContent ?? cbsa;
+
+  currentRows = rows;
+  currentCsvHeaders = ['bucket_idx', 'bucket_label', 'persons', 'share'];
+  currentCsvFilename = `pums_citizenship_${slug(metroName)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by PWGTP. ${metroName}. ${total.toLocaleString()} weighted persons.`;
+
+  chartEl.innerHTML = '';
+  if (total === 0) {
+    chartEl.textContent = `No PUMS person records mapped to ${metroName}.`;
+    statusEl.textContent = '';
+    return;
+  }
+
+  const chart = Plot.plot({
+    width: 800,
+    height: CITIZENSHIP_LABELS.length * 48 + 60,
+    marginLeft: 280,
+    marginRight: 80,
+    marginTop: 40,
+    x: { label: '→ Share', tickFormat: '.0%', grid: true },
+    y: { label: null, domain: CITIZENSHIP_LABELS },
+    marks: [
+      Plot.barX(rows, { x: 'share', y: 'bucket_label', fill: '#4c78a8' }),
+      Plot.text(rows, {
+        x: 'share',
+        y: 'bucket_label',
+        text: (d: { share: number }) => (d.share >= 0.001 ? `${(d.share * 100).toFixed(1)}%` : '<0.1%'),
+        textAnchor: 'start',
+        dx: 6,
+        fontSize: 11,
+        fill: '#222',
+      }),
+      Plot.ruleX([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} categories · ${total.toLocaleString()} weighted persons`;
+}
+
+async function renderDisabilityByAge(conn: AsyncDuckDBConnection, states: string[]) {
+  const cbsa = pumsMetroSelect.value;
+  if (!cbsa) {
+    chartEl.innerHTML = '';
+    chartEl.textContent = 'Pick a metro.';
+    statusEl.textContent = '';
+    sourceEl.textContent = '';
+    return;
+  }
+  const person = pumsPersonFiles(states);
+  const sql = `
+    WITH joined AS (
+      SELECT p.AGEP, p.DIS, p.PWGTP
+      FROM read_parquet([${person}]) p
+      JOIN read_parquet('${url(CROSSWALK_PARQUET)}') c
+        ON p.STATE = c.state_fips AND p.PUMA = c.puma
+      WHERE c.cbsa_code = '${cbsa.replace(/'/g, "''")}'
+        AND p.AGEP IS NOT NULL
+        AND p.DIS IS NOT NULL
+    ),
+    bucketed AS (
+      SELECT PWGTP, DIS,
+        CASE
+          WHEN AGEP < 18 THEN 1
+          WHEN AGEP < 25 THEN 2
+          WHEN AGEP < 35 THEN 3
+          WHEN AGEP < 45 THEN 4
+          WHEN AGEP < 55 THEN 5
+          WHEN AGEP < 65 THEN 6
+          WHEN AGEP < 75 THEN 7
+          ELSE 8
+        END AS bucket_idx
+      FROM joined
+    )
+    SELECT bucket_idx,
+      CAST(SUM(PWGTP) FILTER (WHERE DIS = 1) AS DOUBLE) /
+        NULLIF(CAST(SUM(PWGTP) AS DOUBLE), 0) AS disability_rate,
+      CAST(SUM(PWGTP) AS BIGINT) AS total_persons
+    FROM bucketed
+    GROUP BY bucket_idx
+    ORDER BY bucket_idx
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { bucket_idx: bigint | number; disability_rate: number | null; total_persons: bigint }[]).map(
+    (r) => ({
+      bucket_idx: Number(r.bucket_idx),
+      bucket_label: AGE_BUCKETS[Number(r.bucket_idx) - 1] ?? '?',
+      disability_rate: r.disability_rate ?? 0,
+      total_persons: Number(r.total_persons),
+    }),
+  );
+
+  const total = rows.reduce((s, r) => s + r.total_persons, 0);
+  const overallRate = total > 0
+    ? rows.reduce((s, r) => s + r.disability_rate * r.total_persons, 0) / total
+    : 0;
+  const metroName = pumsMetroSelect.options[pumsMetroSelect.selectedIndex]?.textContent ?? cbsa;
+
+  currentRows = rows;
+  currentCsvHeaders = ['bucket_idx', 'bucket_label', 'disability_rate', 'total_persons'];
+  currentCsvFilename = `pums_disability_${slug(metroName)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by PWGTP. ${metroName}. Overall disability rate: ${(overallRate * 100).toFixed(1)}% of ${total.toLocaleString()} persons.`;
+
+  chartEl.innerHTML = '';
+  if (total === 0) {
+    chartEl.textContent = `No PUMS person records mapped to ${metroName}.`;
+    statusEl.textContent = '';
+    return;
+  }
+
+  const chart = Plot.plot({
+    width: 720,
+    height: 420,
+    marginLeft: 60,
+    marginRight: 30,
+    marginTop: 40,
+    marginBottom: 60,
+    x: { label: 'Age bracket', domain: AGE_BUCKETS, type: 'band' },
+    y: { label: '↑ Share with a disability', tickFormat: '.0%', grid: true },
+    marks: [
+      Plot.barY(rows, { x: 'bucket_label', y: 'disability_rate', fill: '#4c78a8' }),
+      Plot.text(rows, {
+        x: 'bucket_label',
+        y: 'disability_rate',
+        text: (d: { disability_rate: number }) => `${(d.disability_rate * 100).toFixed(1)}%`,
+        textAnchor: 'middle',
+        dy: -6,
+        fontSize: 10,
+        fill: '#222',
+      }),
+      Plot.ruleY([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} age bands · ${total.toLocaleString()} weighted persons`;
+}
+
+const HHL_LABELS = [
+  'English only',
+  'Spanish',
+  'Other Indo-European',
+  'Asian / Pacific Island',
+  'Other language',
+];
+
+async function renderLanguageByMetro(conn: AsyncDuckDBConnection, states: string[]) {
+  const cbsa = pumsMetroSelect.value;
+  if (!cbsa) {
+    chartEl.innerHTML = '';
+    chartEl.textContent = 'Pick a metro.';
+    statusEl.textContent = '';
+    sourceEl.textContent = '';
+    return;
+  }
+  const housing = pumsHousingFiles(states);
+  const sql = `
+    WITH joined AS (
+      SELECT h.HHL, h.WGTP
+      FROM read_parquet([${housing}]) h
+      JOIN read_parquet('${url(CROSSWALK_PARQUET)}') c
+        ON h.STATE = c.state_fips AND h.PUMA = c.puma
+      WHERE c.cbsa_code = '${cbsa.replace(/'/g, "''")}'
+        AND h.HHL IS NOT NULL
+    )
+    SELECT HHL AS bucket_idx,
+      CAST(SUM(WGTP) AS BIGINT) AS households,
+      CAST(SUM(WGTP) AS DOUBLE) /
+        NULLIF(CAST(SUM(SUM(WGTP)) OVER () AS DOUBLE), 0) AS share
+    FROM joined
+    GROUP BY HHL
+    ORDER BY HHL
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { bucket_idx: bigint | number; households: bigint; share: number | null }[]).map(
+    (r) => ({
+      bucket_idx: Number(r.bucket_idx),
+      bucket_label: HHL_LABELS[Number(r.bucket_idx) - 1] ?? '?',
+      households: Number(r.households),
+      share: r.share ?? 0,
+    }),
+  );
+
+  const total = rows.reduce((s, r) => s + r.households, 0);
+  const metroName = pumsMetroSelect.options[pumsMetroSelect.selectedIndex]?.textContent ?? cbsa;
+
+  currentRows = rows;
+  currentCsvHeaders = ['bucket_idx', 'bucket_label', 'households', 'share'];
+  currentCsvFilename = `pums_language_${slug(metroName)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by WGTP. ${metroName}. Household-level language code (HHL). ${total.toLocaleString()} weighted households (excludes vacant).`;
+
+  chartEl.innerHTML = '';
+  if (total === 0) {
+    chartEl.textContent = `No PUMS housing records with HHL mapped to ${metroName}.`;
+    statusEl.textContent = '';
+    return;
+  }
+
+  const chart = Plot.plot({
+    width: 760,
+    height: HHL_LABELS.length * 50 + 60,
+    marginLeft: 220,
+    marginRight: 80,
+    marginTop: 40,
+    x: { label: '→ Share of households', tickFormat: '.0%', grid: true },
+    y: { label: null, domain: HHL_LABELS },
+    marks: [
+      Plot.barX(rows, { x: 'share', y: 'bucket_label', fill: '#4c78a8' }),
+      Plot.text(rows, {
+        x: 'share',
+        y: 'bucket_label',
+        text: (d: { share: number }) => (d.share >= 0.001 ? `${(d.share * 100).toFixed(1)}%` : '<0.1%'),
+        textAnchor: 'start',
+        dx: 6,
+        fontSize: 11,
+        fill: '#222',
+      }),
+      Plot.ruleX([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} categories · ${total.toLocaleString()} weighted households`;
+}
+
+async function renderMortgageBurdenStack(conn: AsyncDuckDBConnection, states: string[], isAll: boolean) {
+  const housing = pumsHousingFiles(states);
+  const burdenOrder = [
+    'Not burdened (<30%)',
+    'Cost-burdened (30-49%)',
+    'Severely burdened (50%+)',
+  ];
+
+  const sql = `
+    WITH owners AS (
+      SELECT HINCP, WGTP, OCPIP
+      FROM read_parquet([${housing}])
+      WHERE TEN IN (1, 2)
+        AND HINCP IS NOT NULL
+        AND OCPIP IS NOT NULL
+    ),
+    binned AS (
+      SELECT WGTP,
+        NTILE(10) OVER (ORDER BY HINCP) AS income_decile,
+        CASE
+          WHEN OCPIP >= 50 THEN 'Severely burdened (50%+)'
+          WHEN OCPIP >= 30 THEN 'Cost-burdened (30-49%)'
+          ELSE 'Not burdened (<30%)'
+        END AS burden
+      FROM owners
+    )
+    SELECT income_decile, burden,
+      CAST(SUM(WGTP) AS DOUBLE) /
+        NULLIF(CAST(SUM(SUM(WGTP)) OVER (PARTITION BY income_decile) AS DOUBLE), 0) AS share,
+      CAST(SUM(WGTP) AS BIGINT) AS households
+    FROM binned
+    GROUP BY income_decile, burden
+    ORDER BY income_decile,
+      CASE burden
+        WHEN 'Not burdened (<30%)' THEN 1
+        WHEN 'Cost-burdened (30-49%)' THEN 2
+        WHEN 'Severely burdened (50%+)' THEN 3
+      END
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { income_decile: bigint | number; burden: string; share: number | null; households: bigint }[]).map(
+    (r) => ({
+      income_decile: Number(r.income_decile),
+      burden: r.burden,
+      share: r.share ?? 0,
+      households: Number(r.households),
+    }),
+  );
+
+  const totalOwners = rows.reduce((s, r) => s + r.households, 0);
+  const stateLabel = isAll ? `All PUMS states (${states.length})` : stateNameByFips(states[0]);
+
+  currentRows = rows;
+  currentCsvHeaders = ['income_decile', 'burden', 'share', 'households'];
+  currentCsvFilename = `pums_mortgage_burden_${slug(stateLabel)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by WGTP. Owner-occupied households (TEN ∈ {1,2}) in ${stateLabel}. ${totalOwners.toLocaleString()} weighted owners. OCPIP = monthly owner costs as % of income.`;
+
+  chartEl.innerHTML = '';
+  const chart = Plot.plot({
+    width: 720,
+    height: 440,
+    marginLeft: 60,
+    marginRight: 30,
+    marginTop: 40,
+    marginBottom: 60,
+    x: { label: 'Income decile (10 = highest)', domain: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], type: 'band' },
+    y: { label: '↑ Share of owner households', tickFormat: '.0%', grid: true, domain: [0, 1] },
+    color: {
+      legend: true,
+      domain: burdenOrder,
+      range: ['#a6cee3', '#fdae61', '#d73027'],
+    },
+    marks: [
+      Plot.barY(rows, { x: 'income_decile', y: 'share', fill: 'burden', order: burdenOrder }),
+      Plot.ruleY([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${rows.length} rows · ${totalOwners.toLocaleString()} weighted owners`;
 }
 
 const AGE_BUCKETS = ['<18', '18-24', '25-34', '35-44', '45-54', '55-64', '65-74', '75+'];

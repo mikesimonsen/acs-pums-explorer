@@ -42,11 +42,15 @@ HOUSING_COLS = [
     "SERIALNO", "STATE", "PUMA", "WGTP",
     "TEN", "VALP", "RNTP", "GRPIP", "OCPIP",
     "HINCP", "FINCP", "MV", "BDSP", "RMSP", "YRBLT",
+    "HHL",  # Household language: 1=English only, 2=Spanish, 3=Other Indo-Eur, 4=Asian/PI, 5=Other
 ]
 
 PERSON_COLS = [
     "SERIALNO", "SPORDER", "STATE", "PUMA", "PWGTP",
     "AGEP", "RAC1P", "HISP", "SCHL",
+    "SEX",  # 1=Male, 2=Female
+    "CIT",  # Citizenship status (1-5)
+    "DIS",  # Disability recode: 1=With, 2=Without
 ]
 
 STRING_COLS = {"SERIALNO", "STATE", "PUMA"}
