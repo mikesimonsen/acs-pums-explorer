@@ -204,7 +204,21 @@ const PUMS_XTABS: PumsXtab[] = [
     label: 'Rent burden distribution by income decile',
     needsPerson: false,
   },
+  {
+    key: 'recent_movers_by_tenure_metro',
+    label: 'Recent movers (last 12 months) by tenure × metro',
+    needsPerson: false,
+  },
+  {
+    key: 'home_value_by_metro',
+    label: 'Home value distribution by metro',
+    needsPerson: false,
+  },
 ];
+
+const CROSSWALK_PARQUET = 'data/parquet/puma_cbsa_crosswalk.parquet';
+const TOP_N_METROS = 15;
+const TOP_N_METROS_FACETED = 6;
 
 // State FIPS codes that have PUMS Parquets in data/parquet/pums/.
 const PUMS_HOUSING_STATES = ['06', '12', '36', '48', '56'];
@@ -816,7 +830,230 @@ async function renderPums(conn: AsyncDuckDBConnection, xtab: PumsXtab, stateFips
     await renderOwnershipHeatmap(conn, pool, isAll);
   } else if (xtab.key === 'rent_burden_by_income') {
     await renderRentBurdenStack(conn, pool, isAll);
+  } else if (xtab.key === 'recent_movers_by_tenure_metro') {
+    await renderRecentMoversByMetro(conn, pool, isAll);
+  } else if (xtab.key === 'home_value_by_metro') {
+    await renderHomeValueByMetro(conn, pool, isAll);
   }
+}
+
+async function renderRecentMoversByMetro(conn: AsyncDuckDBConnection, states: string[], isAll: boolean) {
+  const housing = pumsHousingFiles(states);
+  const sql = `
+    WITH joined AS (
+      SELECT h.MV, h.WGTP, h.TEN, c.cbsa_code, c.cbsa_name
+      FROM read_parquet([${housing}]) h
+      JOIN read_parquet('${url(CROSSWALK_PARQUET)}') c
+        ON h.STATE = c.state_fips AND h.PUMA = c.puma
+      WHERE h.TEN BETWEEN 1 AND 4
+        AND c.cbsa_code NOT LIKE 'NM_%'
+    ),
+    metros AS (
+      SELECT cbsa_code, cbsa_name, SUM(WGTP) AS metro_total
+      FROM joined GROUP BY cbsa_code, cbsa_name
+      ORDER BY metro_total DESC LIMIT ${TOP_N_METROS}
+    ),
+    agg AS (
+      SELECT
+        j.cbsa_code,
+        j.cbsa_name,
+        CASE WHEN j.TEN IN (1, 2) THEN 'Owner' ELSE 'Renter' END AS tenure,
+        CAST(SUM(j.WGTP) FILTER (WHERE j.MV = 1) AS DOUBLE) /
+          NULLIF(CAST(SUM(j.WGTP) AS DOUBLE), 0) AS recent_mover_share,
+        CAST(SUM(j.WGTP) AS BIGINT) AS households
+      FROM joined j
+      JOIN metros m USING (cbsa_code)
+      GROUP BY j.cbsa_code, j.cbsa_name, tenure
+    )
+    SELECT a.*, m.metro_total
+    FROM agg a JOIN metros m USING (cbsa_code)
+    ORDER BY m.metro_total DESC, a.tenure
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { cbsa_code: string; cbsa_name: string; tenure: string; recent_mover_share: number | null; households: bigint; metro_total: bigint }[]).map(
+    (r) => ({
+      cbsa_code: r.cbsa_code,
+      cbsa_name: r.cbsa_name,
+      tenure: r.tenure,
+      recent_mover_share: r.recent_mover_share ?? 0,
+      households: Number(r.households),
+      metro_total: Number(r.metro_total),
+    }),
+  );
+
+  const stateLabel = isAll ? `All PUMS states (${states.length})` : stateNameByFips(states[0]);
+  currentRows = rows;
+  currentCsvHeaders = ['cbsa_code', 'cbsa_name', 'tenure', 'recent_mover_share', 'households'];
+  currentCsvFilename = `pums_recent_movers_${slug(stateLabel)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by WGTP. ${stateLabel}. Top ${TOP_N_METROS} metros by occupied housing units. MV=1 means moved in within last 12 months.`;
+
+  chartEl.innerHTML = '';
+  if (rows.length === 0) {
+    chartEl.textContent = 'No metro data for the selected state.';
+    statusEl.textContent = '';
+    return;
+  }
+
+  // Sort metros by overall recent mover rate (across both tenures) so
+  // hotter-turnover metros end up at top.
+  const metroOrder = Array.from(new Set(rows.map((r) => r.cbsa_name)));
+
+  const chart = Plot.plot({
+    width: 800,
+    height: TOP_N_METROS * 38 + 80,
+    marginLeft: 280,
+    marginRight: 30,
+    marginTop: 40,
+    marginBottom: 40,
+    x: { label: '→ Share of households who moved within 12 months', tickFormat: '.0%', grid: true },
+    y: { label: null, domain: metroOrder },
+    color: { legend: true, domain: ['Owner', 'Renter'], range: ['#4c78a8', '#e45756'] },
+    marks: [
+      Plot.barX(rows, {
+        x: 'recent_mover_share',
+        y: 'cbsa_name',
+        fill: 'tenure',
+        fy: 'tenure',
+        sort: { y: 'data', order: null },
+      }),
+      Plot.text(rows, {
+        x: 'recent_mover_share',
+        y: 'cbsa_name',
+        fy: 'tenure',
+        text: (d: { recent_mover_share: number }) => `${(d.recent_mover_share * 100).toFixed(1)}%`,
+        textAnchor: 'start',
+        dx: 4,
+        fontSize: 10,
+        fill: '#222',
+      }),
+      Plot.ruleX([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${metroOrder.length} metros · ${rows.length} rows`;
+}
+
+function shortMetroName(cbsaName: string): string {
+  // "Los Angeles-Long Beach-Anaheim, CA" → "Los Angeles, CA"
+  const idx = cbsaName.lastIndexOf(', ');
+  if (idx < 0) return cbsaName;
+  const cities = cbsaName.slice(0, idx);
+  const state = cbsaName.slice(idx + 2);
+  const firstCity = cities.split('-')[0];
+  return `${firstCity}, ${state}`;
+}
+
+const VALUE_BUCKETS = [
+  { label: '< $100k', min: 0, max: 99_999 },
+  { label: '$100k–$249k', min: 100_000, max: 249_999 },
+  { label: '$250k–$499k', min: 250_000, max: 499_999 },
+  { label: '$500k–$749k', min: 500_000, max: 749_999 },
+  { label: '$750k–$999k', min: 750_000, max: 999_999 },
+  { label: '$1M–$1.49M', min: 1_000_000, max: 1_499_999 },
+  { label: '$1.5M–$1.99M', min: 1_500_000, max: 1_999_999 },
+  { label: '$2M+', min: 2_000_000, max: Number.MAX_SAFE_INTEGER },
+];
+
+async function renderHomeValueByMetro(conn: AsyncDuckDBConnection, states: string[], isAll: boolean) {
+  const housing = pumsHousingFiles(states);
+  const sql = `
+    WITH joined AS (
+      SELECT h.VALP, h.WGTP, c.cbsa_code, c.cbsa_name
+      FROM read_parquet([${housing}]) h
+      JOIN read_parquet('${url(CROSSWALK_PARQUET)}') c
+        ON h.STATE = c.state_fips AND h.PUMA = c.puma
+      WHERE h.TEN IN (1, 2)
+        AND h.VALP IS NOT NULL
+        AND c.cbsa_code NOT LIKE 'NM_%'
+    ),
+    metros AS (
+      SELECT cbsa_code, cbsa_name, SUM(WGTP) AS metro_total
+      FROM joined GROUP BY cbsa_code, cbsa_name
+      ORDER BY metro_total DESC LIMIT ${TOP_N_METROS_FACETED}
+    ),
+    bucketed AS (
+      SELECT
+        j.cbsa_code,
+        j.cbsa_name,
+        j.WGTP,
+        CASE
+          WHEN VALP < 100000 THEN 1
+          WHEN VALP < 250000 THEN 2
+          WHEN VALP < 500000 THEN 3
+          WHEN VALP < 750000 THEN 4
+          WHEN VALP < 1000000 THEN 5
+          WHEN VALP < 1500000 THEN 6
+          WHEN VALP < 2000000 THEN 7
+          ELSE 8
+        END AS bucket_idx
+      FROM joined j JOIN metros m USING (cbsa_code)
+    )
+    SELECT
+      cbsa_code,
+      cbsa_name,
+      bucket_idx,
+      CAST(SUM(WGTP) AS DOUBLE) /
+        NULLIF(CAST(SUM(SUM(WGTP)) OVER (PARTITION BY cbsa_code) AS DOUBLE), 0) AS share,
+      CAST(SUM(WGTP) AS BIGINT) AS units
+    FROM bucketed
+    GROUP BY cbsa_code, cbsa_name, bucket_idx
+    ORDER BY cbsa_name, bucket_idx
+  `;
+  const result = await conn.query(sql);
+  const rows = (result.toArray() as { cbsa_code: string; cbsa_name: string; bucket_idx: bigint | number; share: number | null; units: bigint }[]).map(
+    (r) => ({
+      cbsa_code: r.cbsa_code,
+      cbsa_name: r.cbsa_name,
+      metro_short: shortMetroName(r.cbsa_name),
+      bucket_idx: Number(r.bucket_idx),
+      bucket_label: VALUE_BUCKETS[Number(r.bucket_idx) - 1]?.label ?? '?',
+      share: r.share ?? 0,
+      units: Number(r.units),
+    }),
+  );
+
+  const stateLabel = isAll ? `All PUMS states (${states.length})` : stateNameByFips(states[0]);
+  currentRows = rows;
+  currentCsvHeaders = ['cbsa_code', 'cbsa_name', 'bucket_idx', 'bucket_label', 'share', 'units'];
+  currentCsvFilename = `pums_home_value_metros_${slug(stateLabel)}.csv`;
+
+  sourceEl.textContent = `PUMS 2024 1-year, weighted by WGTP. Owner-occupied units (TEN ∈ {1,2}) in ${stateLabel}. Top ${TOP_N_METROS_FACETED} metros by occupied owner units.`;
+
+  chartEl.innerHTML = '';
+  if (rows.length === 0) {
+    chartEl.textContent = 'No metro data for the selected state.';
+    statusEl.textContent = '';
+    return;
+  }
+
+  const metroOrder = Array.from(new Set(rows.map((r) => r.metro_short)));
+  const bucketOrder = VALUE_BUCKETS.map((b) => b.label);
+
+  const chart = Plot.plot({
+    width: 1080,
+    height: 380,
+    marginLeft: 70,
+    marginRight: 20,
+    marginTop: 50,
+    marginBottom: 100,
+    x: { label: 'Home value bracket', domain: bucketOrder, tickRotate: -45 },
+    y: { label: '↑ Share of owner units', tickFormat: '.0%', grid: true },
+    fx: { label: null, domain: metroOrder },
+    marks: [
+      Plot.barY(rows, {
+        x: 'bucket_label',
+        y: 'share',
+        fx: 'metro_short',
+        fill: '#4c78a8',
+      }),
+      Plot.ruleY([0]),
+    ],
+  });
+  chartEl.appendChild(chart);
+
+  statusEl.textContent = `${metroOrder.length} metros · ${rows.length} rows`;
 }
 
 async function renderOwnershipHeatmap(conn: AsyncDuckDBConnection, states: string[], isAll: boolean) {
