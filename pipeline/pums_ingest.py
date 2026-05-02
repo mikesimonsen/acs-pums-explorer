@@ -38,19 +38,55 @@ PUMS_YEAR = 2024
 PUMS_BASE = f"https://www2.census.gov/programs-surveys/acs/data/pums/{PUMS_YEAR}/1-Year"
 
 # Note: 2024 PUMS renamed "ST" to "STATE" and "YBL" to "YRBLT".
+# Column projection is intentionally wide so a single ingestion run covers
+# every topic in DATA_CATALOG.md. Adding columns is cheap (zstd Parquet);
+# re-downloading 800 MB of national zips is not.
 HOUSING_COLS = [
+    # Identifiers + weights
     "SERIALNO", "STATE", "PUMA", "WGTP",
+    # Tenure, value, rent, costs
     "TEN", "VALP", "RNTP", "GRPIP", "OCPIP",
-    "HINCP", "FINCP", "MV", "BDSP", "RMSP", "YRBLT",
-    "HHL",  # Household language: 1=English only, 2=Spanish, 3=Other Indo-Eur, 4=Asian/PI, 5=Other
+    # Income
+    "HINCP", "FINCP",
+    # Move-in, structure
+    "MV", "BDSP", "RMSP", "YRBLT", "BLD",  # BLD: units in structure
+    # Household composition
+    "HHT",   # Household type
+    "HHL",   # Household language
+    "MULTG", # Multigenerational household (1/2)
+    "NP",    # Number of persons in household
+    "NPF",   # Number of persons in family
+    # Vacancy
+    "VACS",  # Vacancy status (vacant units only)
+    # Unit type / group quarters
+    "TYPEHUGQ",
 ]
 
 PERSON_COLS = [
+    # Identifiers + weights
     "SERIALNO", "SPORDER", "STATE", "PUMA", "PWGTP",
-    "AGEP", "RAC1P", "HISP", "SCHL",
-    "SEX",  # 1=Male, 2=Female
-    "CIT",  # Citizenship status (1-5)
-    "DIS",  # Disability recode: 1=With, 2=Without
+    # Demographics
+    "AGEP", "SEX", "RAC1P", "HISP",
+    # Nativity, citizenship, language
+    "CIT", "NATIVITY", "LANX", "ENG",
+    # Education
+    "SCHL", "FOD1P",  # Field of degree (recode 1)
+    # Marital + fertility
+    "MAR", "FER",
+    # Employment / labor force
+    "ESR", "INDP", "OCCP", "COW", "WKHP", "WKWN",
+    # Commute
+    "JWMNP", "JWTRNS",
+    # Income + poverty
+    "PINCP", "WAGP", "POVPIP",
+    # Migration (state of residence 1 year ago)
+    "MIGSP",
+    # Insurance
+    "HICOV", "PRIVCOV", "PUBCOV",
+    # Disability detail
+    "DIS", "DEAR", "DEYE", "DREM", "DPHY",
+    # Veteran
+    "MIL",
 ]
 
 STRING_COLS = {"SERIALNO", "STATE", "PUMA"}
@@ -140,11 +176,13 @@ def csv_to_parquet(zip_path: Path, parquet_path: Path, wanted_cols: List[str]) -
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = parquet_path.with_suffix(parquet_path.suffix + ".tmp")
     pq.write_table(
         pa.Table.from_pandas(df, preserve_index=False),
-        parquet_path,
+        tmp,
         compression="zstd",
     )
+    tmp.rename(parquet_path)
     return len(df)
 
 
