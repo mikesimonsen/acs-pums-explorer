@@ -5,23 +5,131 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ACS / PUMS Explorer</title>
     <style>
+      :root {
+        --fg: #222;
+        --muted: #666;
+        --muted-2: #999;
+        --border: #ddd;
+        --panel: #f4f4f4;
+        --accent: #0b6cb1;
+        --stub-bg: #fafafa;
+      }
       body {
         font-family: system-ui, -apple-system, sans-serif;
         max-width: 72rem;
         margin: 2rem auto;
         padding: 0 1rem;
-        color: #222;
+        color: var(--fg);
       }
       h1 { margin-bottom: 0.25rem; }
-      .subtitle { color: #555; margin-top: 0; }
+      .subtitle { color: var(--muted); margin-top: 0; }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      #breadcrumb {
+        margin: 1rem 0 0.5rem;
+        font-size: 0.9rem;
+        color: var(--muted);
+        min-height: 1.2rem;
+      }
+      #breadcrumb a { color: var(--accent); }
+
+      .view-pane[hidden] { display: none !important; }
+
+      /* --- Gallery view --- */
+      .topic-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+        gap: 1rem;
+        margin: 1.5rem 0;
+      }
+      .topic-card {
+        display: block;
+        padding: 1rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: white;
+        cursor: pointer;
+        transition: border-color 0.1s, transform 0.1s;
+      }
+      .topic-card:hover {
+        border-color: var(--accent);
+        text-decoration: none;
+      }
+      .topic-card h3 { margin: 0 0 0.25rem; color: var(--fg); }
+      .topic-card .blurb { color: var(--muted); font-size: 0.9rem; margin: 0 0 0.6rem; }
+      .topic-card .counts { font-size: 0.8rem; color: var(--muted-2); }
+
+      /* --- Topic detail view --- */
+      .topic-header h2 { margin-bottom: 0.25rem; }
+      .topic-header .blurb { color: var(--muted); margin-top: 0; }
+      .analysis-section { margin: 1.5rem 0; }
+      .analysis-section h3 {
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        margin: 0 0 0.6rem;
+      }
+      .analysis-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+        gap: 0.75rem;
+      }
+      .analysis-card {
+        padding: 0.75rem 0.9rem;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: white;
+        display: block;
+      }
+      a.analysis-card { cursor: pointer; }
+      a.analysis-card:hover {
+        border-color: var(--accent);
+        text-decoration: none;
+      }
+      .analysis-card.stub { background: var(--stub-bg); cursor: default; }
+      .analysis-card .title {
+        font-weight: 500;
+        color: var(--fg);
+        margin-bottom: 0.2rem;
+      }
+      .analysis-card .hook {
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      .analysis-card .needs {
+        font-size: 0.75rem;
+        color: var(--muted-2);
+        font-style: italic;
+        margin-top: 0.4rem;
+      }
+      .analysis-card .kind-badge {
+        display: inline-block;
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 0.1rem 0.4rem;
+        border-radius: 3px;
+        background: #eef3f8;
+        color: #4a6987;
+        margin-left: 0.4rem;
+        vertical-align: middle;
+      }
+      .analysis-card .kind-badge.pums { background: #f3eef8; color: #6b4a87; }
+      .analysis-card .kind-badge.dist { background: #f8f3ee; color: #87654a; }
+      .analysis-card .kind-badge.scatter { background: #eef8f3; color: #4a8767; }
+      .analysis-card .kind-badge.stub { background: #f0f0f0; color: #888; }
+
+      /* --- Analysis (chart) view: same as before --- */
       .controls {
         display: flex;
         gap: 1rem;
         align-items: center;
         flex-wrap: wrap;
-        margin: 1.5rem 0 0.5rem;
+        margin: 1rem 0 0.5rem;
         padding: 0.75rem 1rem;
-        background: #f4f4f4;
+        background: var(--panel);
         border-radius: 6px;
       }
       .controls label { font-weight: 500; }
@@ -38,12 +146,12 @@
       .controls [hidden] { display: none !important; }
       #status {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        color: #777;
+        color: var(--muted);
         font-size: 0.85rem;
         margin-left: auto;
       }
       #source {
-        color: #777;
+        color: var(--muted);
         font-size: 0.85rem;
         margin: 0 0 1rem;
       }
@@ -54,35 +162,58 @@
   <body>
     <main>
       <h1>ACS / PUMS Explorer</h1>
-      <p class="subtitle">County-level housing and demographic metrics from the American Community Survey, 2020–2024 5-year estimates.</p>
-      <div class="controls">
-        <label>View: <select id="view">
-          <option value="bar">Bar chart (rank counties)</option>
-          <option value="scatter">Scatter (compare two metrics)</option>
-          <option value="distribution">Distribution</option>
-          <option value="pums">PUMS cross-tab</option>
-        </select></label>
-        <span class="group" data-view="bar">
-          <label>Metric: <select id="metric"></select></label>
-        </span>
-        <span class="group" data-view="scatter" hidden>
-          <label>X: <select id="xMetric"></select></label>
-          <label>Y: <select id="yMetric"></select></label>
-        </span>
-        <span class="group" data-view="distribution" hidden>
-          <label>Show: <select id="distribution"></select></label>
-          <label>County: <select id="county"></select></label>
-        </span>
-        <span class="group" data-view="pums" hidden>
-          <label>Cross-tab: <select id="pumsXtab"></select></label>
-          <label id="pumsMetroLabel" hidden>Metro: <select id="pumsMetro"></select></label>
-        </span>
-        <label>State: <select id="state" disabled></select></label>
-        <button id="download" disabled>Download CSV</button>
-        <span id="status">Initializing DuckDB-WASM…</span>
-      </div>
-      <p id="source"></p>
-      <div id="chart"></div>
+      <p class="subtitle">Browse America by topic — county and metro data from the American Community Survey and PUMS microdata.</p>
+      <nav id="breadcrumb"></nav>
+
+      <section id="gallery-view" class="view-pane">
+        <div id="topic-grid" class="topic-grid"></div>
+      </section>
+
+      <section id="topic-view" class="view-pane" hidden>
+        <div class="topic-header">
+          <h2 id="topic-name"></h2>
+          <p id="topic-blurb" class="blurb"></p>
+        </div>
+        <div class="analysis-section">
+          <h3 id="available-heading">Available now</h3>
+          <div id="available-grid" class="analysis-grid"></div>
+        </div>
+        <div class="analysis-section" id="stub-section" hidden>
+          <h3>Coming soon</h3>
+          <div id="stub-grid" class="analysis-grid"></div>
+        </div>
+      </section>
+
+      <section id="analysis-view" class="view-pane" hidden>
+        <div class="controls">
+          <label>View: <select id="view">
+            <option value="bar">Bar chart (rank counties)</option>
+            <option value="scatter">Scatter (compare two metrics)</option>
+            <option value="distribution">Distribution</option>
+            <option value="pums">PUMS cross-tab</option>
+          </select></label>
+          <span class="group" data-view="bar">
+            <label>Metric: <select id="metric"></select></label>
+          </span>
+          <span class="group" data-view="scatter" hidden>
+            <label>X: <select id="xMetric"></select></label>
+            <label>Y: <select id="yMetric"></select></label>
+          </span>
+          <span class="group" data-view="distribution" hidden>
+            <label>Show: <select id="distribution"></select></label>
+            <label>County: <select id="county"></select></label>
+          </span>
+          <span class="group" data-view="pums" hidden>
+            <label>Cross-tab: <select id="pumsXtab"></select></label>
+            <label id="pumsMetroLabel" hidden>Metro: <select id="pumsMetro"></select></label>
+          </span>
+          <label>State: <select id="state" disabled></select></label>
+          <button id="download" disabled>Download CSV</button>
+          <span id="status">Initializing DuckDB-WASM…</span>
+        </div>
+        <p id="source"></p>
+        <div id="chart"></div>
+      </section>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

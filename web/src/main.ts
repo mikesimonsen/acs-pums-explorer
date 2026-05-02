@@ -1,6 +1,15 @@
 import * as Plot from '@observablehq/plot';
 import type { AsyncDuckDBConnection } from '@duckdb/duckdb-wasm';
 import { getDuckDB } from './duckdb';
+import {
+  TOPICS,
+  topicById,
+  totalAvailable,
+  totalStub,
+  analysisHash,
+  type Topic,
+  type AnalysisRef,
+} from './topics';
 
 type Metric = {
   key: string;
@@ -280,8 +289,16 @@ const TOP_N_METROS = 15;
 const TOP_N_METROS_FACETED = 6;
 
 // State FIPS codes that have PUMS Parquets in data/parquet/pums/.
-const PUMS_HOUSING_STATES = ['06', '12', '36', '48', '56'];
-const PUMS_PERSON_STATES = ['06', '12', '36', '48', '56'];
+// Full 50 states + DC ingested from PUMS 2024 1-year.
+const PUMS_HOUSING_STATES = [
+  '01', '02', '04', '05', '06', '08', '09', '10', '11', '12',
+  '13', '15', '16', '17', '18', '19', '20', '21', '22', '23',
+  '24', '25', '26', '27', '28', '29', '30', '31', '32', '33',
+  '34', '35', '36', '37', '38', '39', '40', '41', '42', '44',
+  '45', '46', '47', '48', '49', '50', '51', '53', '54', '55',
+  '56',
+];
+const PUMS_PERSON_STATES = PUMS_HOUSING_STATES;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const viewSelect = $<HTMLSelectElement>('view');
@@ -298,6 +315,18 @@ const downloadBtn = $<HTMLButtonElement>('download');
 const chartEl = $<HTMLDivElement>('chart');
 const statusEl = $<HTMLSpanElement>('status');
 const sourceEl = $<HTMLParagraphElement>('source');
+
+const breadcrumbEl = $<HTMLElement>('breadcrumb');
+const galleryViewEl = $<HTMLElement>('gallery-view');
+const topicViewEl = $<HTMLElement>('topic-view');
+const analysisViewEl = $<HTMLElement>('analysis-view');
+const topicGridEl = $<HTMLDivElement>('topic-grid');
+const topicNameEl = $<HTMLHeadingElement>('topic-name');
+const topicBlurbEl = $<HTMLParagraphElement>('topic-blurb');
+const availableGridEl = $<HTMLDivElement>('available-grid');
+const stubGridEl = $<HTMLDivElement>('stub-grid');
+const stubSectionEl = $<HTMLDivElement>('stub-section');
+const availableHeadingEl = $<HTMLHeadingElement>('available-heading');
 
 type Row = Record<string, unknown>;
 let currentRows: Row[] = [];
@@ -426,7 +455,206 @@ async function main() {
   downloadBtn.disabled = false;
   await refreshCountyDropdown(conn);
   await refreshPumsMetroDropdown(conn);
+
+  // Topic-first IA: gallery is the homepage. The chart UI only appears when
+  // the route lands on a specific analysis (#/a/<view>/<key>). Hash navigation
+  // wires Back/Forward and direct-link sharing for free.
+  renderGallery();
+  window.addEventListener('hashchange', () => applyRoute(conn));
+  await applyRoute(conn);
+}
+
+// --- Topic-first navigation ---------------------------------------------
+
+type Route =
+  | { kind: 'gallery' }
+  | { kind: 'topic'; id: string }
+  | { kind: 'analysis-bar'; metric: string }
+  | { kind: 'analysis-distribution'; distribution: string }
+  | { kind: 'analysis-pums'; xtab: string }
+  | { kind: 'analysis-scatter'; x: string; y: string };
+
+function parseRoute(hash: string): Route {
+  const h = hash.replace(/^#/, '').replace(/^\//, '');
+  if (h === '' || h === '/') return { kind: 'gallery' };
+  const parts = h.split('/').filter(Boolean);
+  if (parts[0] === 'topic' && parts[1]) return { kind: 'topic', id: parts[1] };
+  if (parts[0] === 'a' && parts.length >= 3) {
+    const view = parts[1];
+    if (view === 'bar') return { kind: 'analysis-bar', metric: parts[2] };
+    if (view === 'distribution') return { kind: 'analysis-distribution', distribution: parts[2] };
+    if (view === 'pums') return { kind: 'analysis-pums', xtab: parts[2] };
+    if (view === 'scatter' && parts[3]) return { kind: 'analysis-scatter', x: parts[2], y: parts[3] };
+  }
+  return { kind: 'gallery' };
+}
+
+async function applyRoute(conn: AsyncDuckDBConnection) {
+  const route = parseRoute(location.hash);
+  switch (route.kind) {
+    case 'gallery':
+      showPane('gallery');
+      setBreadcrumb([]);
+      return;
+    case 'topic': {
+      const topic = topicById(route.id);
+      if (!topic) { location.hash = '#/'; return; }
+      renderTopicDetail(topic);
+      showPane('topic');
+      setBreadcrumb([{ label: 'All topics', href: '#/' }, { label: topic.name }]);
+      return;
+    }
+    case 'analysis-bar':
+      viewSelect.value = 'bar';
+      metricSelect.value = route.metric;
+      setGroupVisibility('bar');
+      await runAnalysisRoute(conn, metricByKey(route.metric).label, 'bar', route.metric);
+      return;
+    case 'analysis-distribution':
+      viewSelect.value = 'distribution';
+      distributionSelect.value = route.distribution;
+      setGroupVisibility('distribution');
+      await runAnalysisRoute(conn, distributionByKey(route.distribution).label, 'distribution', route.distribution);
+      return;
+    case 'analysis-pums':
+      viewSelect.value = 'pums';
+      pumsXtabSelect.value = route.xtab;
+      setGroupVisibility('pums');
+      syncPumsControls();
+      await runAnalysisRoute(conn, pumsXtabByKey(route.xtab).label, 'pums', route.xtab);
+      return;
+    case 'analysis-scatter':
+      viewSelect.value = 'scatter';
+      xMetricSelect.value = route.x;
+      yMetricSelect.value = route.y;
+      setGroupVisibility('scatter');
+      await runAnalysisRoute(conn, `${metricByKey(route.x).label} vs. ${metricByKey(route.y).label}`, 'scatter', `${route.x}-${route.y}`);
+      return;
+  }
+}
+
+async function runAnalysisRoute(conn: AsyncDuckDBConnection, title: string, _view: string, _key: string) {
+  showPane('analysis');
+  // Find the topic this analysis belongs to (first match) for the breadcrumb.
+  const owningTopic = findTopicForCurrentControls();
+  const crumbs: Crumb[] = [{ label: 'All topics', href: '#/' }];
+  if (owningTopic) crumbs.push({ label: owningTopic.name, href: `#/topic/${owningTopic.id}` });
+  crumbs.push({ label: title });
+  setBreadcrumb(crumbs);
   await render(conn);
+}
+
+function findTopicForCurrentControls(): Topic | undefined {
+  const view = viewSelect.value;
+  for (const t of TOPICS) {
+    for (const a of t.analyses) {
+      if (a.kind === 'bar' && view === 'bar' && a.metric === metricSelect.value) return t;
+      if (a.kind === 'distribution' && view === 'distribution' && a.distribution === distributionSelect.value) return t;
+      if (a.kind === 'pums' && view === 'pums' && a.xtab === pumsXtabSelect.value) return t;
+      if (a.kind === 'scatter' && view === 'scatter' && a.x === xMetricSelect.value && a.y === yMetricSelect.value) return t;
+    }
+  }
+  return undefined;
+}
+
+type Crumb = { label: string; href?: string };
+
+function setBreadcrumb(crumbs: Crumb[]) {
+  breadcrumbEl.innerHTML = '';
+  if (crumbs.length === 0) return;
+  crumbs.forEach((c, i) => {
+    if (i > 0) breadcrumbEl.appendChild(document.createTextNode(' / '));
+    if (c.href) {
+      const a = document.createElement('a');
+      a.href = c.href;
+      a.textContent = c.label;
+      breadcrumbEl.appendChild(a);
+    } else {
+      const span = document.createElement('span');
+      span.textContent = c.label;
+      breadcrumbEl.appendChild(span);
+    }
+  });
+}
+
+function showPane(which: 'gallery' | 'topic' | 'analysis') {
+  galleryViewEl.hidden = which !== 'gallery';
+  topicViewEl.hidden = which !== 'topic';
+  analysisViewEl.hidden = which !== 'analysis';
+}
+
+function renderGallery() {
+  topicGridEl.innerHTML = '';
+  for (const t of TOPICS) {
+    const card = document.createElement('a');
+    card.href = `#/topic/${t.id}`;
+    card.className = 'topic-card';
+    const title = document.createElement('h3');
+    title.textContent = t.name;
+    const blurb = document.createElement('p');
+    blurb.className = 'blurb';
+    blurb.textContent = t.blurb;
+    const counts = document.createElement('p');
+    counts.className = 'counts';
+    const av = totalAvailable(t);
+    const st = totalStub(t);
+    const parts: string[] = [];
+    if (av) parts.push(`${av} available`);
+    if (st) parts.push(`${st} coming soon`);
+    counts.textContent = parts.join(' · ');
+    card.append(title, blurb, counts);
+    topicGridEl.appendChild(card);
+  }
+}
+
+function renderTopicDetail(topic: Topic) {
+  topicNameEl.textContent = topic.name;
+  topicBlurbEl.textContent = topic.blurb;
+  availableGridEl.innerHTML = '';
+  stubGridEl.innerHTML = '';
+  const available = topic.analyses.filter((a) => a.kind !== 'stub');
+  const stubs = topic.analyses.filter((a) => a.kind === 'stub');
+
+  availableHeadingEl.textContent = available.length
+    ? `Available now (${available.length})`
+    : 'No live analyses yet';
+  for (const a of available) availableGridEl.appendChild(renderAnalysisCard(a));
+
+  stubSectionEl.hidden = stubs.length === 0;
+  for (const a of stubs) stubGridEl.appendChild(renderAnalysisCard(a));
+}
+
+function renderAnalysisCard(a: AnalysisRef): HTMLElement {
+  const card = document.createElement(a.kind === 'stub' ? 'div' : 'a') as HTMLAnchorElement;
+  card.className = a.kind === 'stub' ? 'analysis-card stub' : 'analysis-card';
+  if (a.kind !== 'stub') (card as HTMLAnchorElement).href = analysisHash(a);
+
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = a.title;
+
+  const badge = document.createElement('span');
+  badge.className = 'kind-badge';
+  if (a.kind === 'pums') { badge.classList.add('pums'); badge.textContent = 'PUMS'; }
+  else if (a.kind === 'distribution') { badge.classList.add('dist'); badge.textContent = 'distribution'; }
+  else if (a.kind === 'scatter') { badge.classList.add('scatter'); badge.textContent = 'scatter'; }
+  else if (a.kind === 'stub') { badge.classList.add('stub'); badge.textContent = 'soon'; }
+  else { badge.textContent = 'county'; }
+  title.appendChild(badge);
+
+  const hook = document.createElement('div');
+  hook.className = 'hook';
+  hook.textContent = a.hook;
+
+  card.append(title, hook);
+
+  if (a.kind === 'stub') {
+    const needs = document.createElement('div');
+    needs.className = 'needs';
+    needs.textContent = `needs: ${a.needs}`;
+    card.appendChild(needs);
+  }
+  return card;
 }
 
 function syncPumsControls() {
@@ -2249,11 +2477,19 @@ async function renderRentBurdenStack(conn: AsyncDuckDBConnection, states: string
 }
 
 const STATE_FIPS_TO_NAME: Record<string, string> = {
-  '06': 'California',
-  '12': 'Florida',
-  '36': 'New York',
-  '48': 'Texas',
-  '56': 'Wyoming',
+  '01': 'Alabama', '02': 'Alaska', '04': 'Arizona', '05': 'Arkansas',
+  '06': 'California', '08': 'Colorado', '09': 'Connecticut', '10': 'Delaware',
+  '11': 'District of Columbia', '12': 'Florida', '13': 'Georgia', '15': 'Hawaii',
+  '16': 'Idaho', '17': 'Illinois', '18': 'Indiana', '19': 'Iowa',
+  '20': 'Kansas', '21': 'Kentucky', '22': 'Louisiana', '23': 'Maine',
+  '24': 'Maryland', '25': 'Massachusetts', '26': 'Michigan', '27': 'Minnesota',
+  '28': 'Mississippi', '29': 'Missouri', '30': 'Montana', '31': 'Nebraska',
+  '32': 'Nevada', '33': 'New Hampshire', '34': 'New Jersey', '35': 'New Mexico',
+  '36': 'New York', '37': 'North Carolina', '38': 'North Dakota', '39': 'Ohio',
+  '40': 'Oklahoma', '41': 'Oregon', '42': 'Pennsylvania', '44': 'Rhode Island',
+  '45': 'South Carolina', '46': 'South Dakota', '47': 'Tennessee', '48': 'Texas',
+  '49': 'Utah', '50': 'Vermont', '51': 'Virginia', '53': 'Washington',
+  '54': 'West Virginia', '55': 'Wisconsin', '56': 'Wyoming',
 };
 
 function stateNameByFips(fips: string): string {
